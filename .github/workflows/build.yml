@@ -1,0 +1,122 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            arch: x86_64
+
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+
+          - name: macos-x86_64
+            os: macos-13
+            arch: x86_64
+
+          - name: macos-aarch64
+            os: macos-latest
+            arch: aarch64
+
+          - name: windows-x86_64
+            os: windows-latest
+            arch: x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm'
+          components: 'native-image'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Clojure tools
+        uses: DeLaGuardo/setup-clojure@12.5
+        with:
+          lein: '2.11.2'
+          bb: 'latest'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('sci/project.clj') }}
+          restore-keys: maven-${{ runner.os }}-
+
+      - name: Build libsci shared library
+        working-directory: sci
+        run: bb libsci:compile
+
+      - name: List build artifacts
+        shell: bash
+        run: ls -la sci/libsci/target/
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libsci-${{ matrix.name }}
+          path: |
+            sci/libsci/target/libsci.*
+            sci/libsci/target/sci.*
+            sci/libsci/target/*.h
+          if-no-files-found: error
+
+  test-example:
+    name: Test (${{ matrix.name }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: macos-x86_64
+            os: macos-13
+          - name: macos-aarch64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download libsci artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: libsci-${{ matrix.name }}
+          path: sci/libsci/target
+
+      - name: Build and run C example
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            export LD_LIBRARY_PATH="$(pwd)/sci/libsci/target:${LD_LIBRARY_PATH:-}"
+          else
+            export DYLD_LIBRARY_PATH="$(pwd)/sci/libsci/target:${DYLD_LIBRARY_PATH:-}"
+          fi
+          cd sci
+          gcc libsci/src/from_c.c -L libsci/target -I libsci/target -lsci -o libsci/target/from_c
+          result=$(libsci/target/from_c "(+ 1 2)")
+          test "$result" = "3" && echo "PASS: eval (+ 1 2) = $result" || { echo "FAIL: expected 3 got $result"; exit 1; }

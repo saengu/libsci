@@ -1,0 +1,26 @@
+# Build artifacts
+sci/libsci/target/
+sci/target/
+sci/classes/
+
+# Native image outputs
+*.so
+*.dylib
+*.dll
+*.lib
+*.h
+*.build_artifacts.txt
+graal_isolate.h
+graal_isolate_dynamic.h
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# IDE
+.idea/
+.vscode/
+*.iml

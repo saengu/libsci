@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            arch: x86_64
+
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+
+          - name: macos-x86_64
+            os: macos-13
+            arch: x86_64
+
+          - name: macos-aarch64
+            os: macos-latest
+            arch: aarch64
+
+          - name: windows-x86_64
+            os: windows-latest
+            arch: x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm'
+          components: 'native-image'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Clojure tools
+        uses: DeLaGuardo/setup-clojure@12.5
+        with:
+          lein: '2.11.2'
+          bb: 'latest'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('sci/project.clj') }}
+          restore-keys: maven-${{ runner.os }}-
+
+      - name: Build libsci shared library
+        working-directory: sci
+        run: bb libsci:compile
+
+      - name: Package release artifact
+        shell: bash
+        run: |
+          mkdir -p release/lib release/include
+          cp sci/libsci/target/libsci.* release/lib/ 2>/dev/null || true
+          cp sci/libsci/target/sci.* release/lib/ 2>/dev/null || true
+          cp sci/libsci/target/*.h release/include/
+          cd release && zip -r "../libsci-${{ matrix.name }}.zip" .
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: libsci-${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-artifacts
+          merge-multiple: false
+
+      - name: List artifacts
+        run: find release-artifacts -type f
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" \
+            --title "${GITHUB_REF#refs/tags/}" \
+            --generate-notes \
+            release-artifacts/*/libsci-*.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
