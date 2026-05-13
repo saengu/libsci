@@ -322,9 +322,15 @@ let final_result = eval_string(thread, expr2);
 **Host side (Zig):**
 
 ```zig
-const c = @cImport({
-    @cInclude("libsci.h");
-});
+// build.zig — translate C header (Zig 0.16 replaces @cImport):
+// const translate = b.addTranslateC(.{
+//     .root_source_file = b.path("libsci/target/include/libsci.h"),
+//     .target = target,
+//     .optimize = optimize,
+// });
+// exe.root_module.addImport("libsci", translate.createModule());
+
+const c = @import("libsci");
 
 // Step 1: eval a script that requests external action
 const expr =
@@ -472,16 +478,22 @@ register_host_fn(thread, name.as_ptr(), my_log as u64);
 Zig:
 
 ```zig
-const c = @cImport({
-    @cInclude("libsci.h");
-});
+// build.zig — translate C header (Zig 0.16 replaces @cImport):
+// const translate = b.addTranslateC(.{
+//     .root_source_file = b.path("libsci/target/include/libsci.h"),
+//     .target = target,
+//     .optimize = optimize,
+// });
+// exe.root_module.addImport("libsci", translate.createModule());
+
+const c = @import("libsci");
 
 // C ABI callbacks
-export fn my_add(a: i64, b: i64) callconv(.C) i64 {
+export fn my_add(a: i64, b: i64) callconv(.c) i64 {
     return a + b;
 }
 
-export fn my_log(msg: [*c]const u8) callconv(.C) void {
+export fn my_log(msg: [*:0]const u8) callconv(.c) void {
     const s = std.mem.span(msg);
     std.debug.print("[host] {s}\n", .{s});
 }
