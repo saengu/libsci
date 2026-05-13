@@ -130,12 +130,44 @@ This project uses GitHub Actions and [GraalVM native-image](https://www.graalvm.
 3. Runs `native-image --shared` to produce the dynamic library
 4. Collects the `.so`/`.dylib`/`.dll` and C headers
 
-SCI is pinned as a git submodule — update it to build newer versions:
+## Triggering Builds
+
+### Automatic (tag push)
+
+Push a `v*` tag to trigger a release build for the current submodule pin:
 
 ```bash
-git submodule update --remote sci
-git commit -m "Bump SCI to latest"
 git tag v0.1.0
+git push --tags
+```
+
+### Manual (any SCI branch/tag/commit)
+
+Go to **Actions → Build** or **Actions → Release → Run workflow** and fill in:
+
+| Input | Build | Release |
+|-------|-------|---------|
+| `sci_ref` | SCI branch, tag, or commit hash | SCI branch, tag, or commit hash |
+| `release_tag` | — | Release name, e.g. `v0.8.43` |
+
+This triggers a build against the specified SCI version without changing the submodule pin. Useful for:
+
+- Testing a specific SCI feature branch
+- Building a release for an older SCI version
+- One-off custom builds with third-party libraries patched in
+
+### Update default SCI version
+
+SCI is pinned as a git submodule. To persistently upgrade the default version:
+
+```bash
+cd sci
+git fetch origin
+git checkout v0.8.43   # or any ref
+cd ..
+git add sci
+git commit -m "Pin SCI to v0.8.43"
+git tag v0.8.43
 git push --tags
 ```
 
