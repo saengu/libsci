@@ -319,7 +319,61 @@ let expr2 = format!("(process-response {:data \"{}\"})", response);
 let final_result = eval_string(thread, expr2);
 ```
 
-**SCI script side:**
+**Host side (Zig):**
+
+```zig
+const c = @cImport({
+    @cInclude("libsci.h");
+});
+
+// Step 1: eval a script that requests external action
+const expr =
+    \\{:action :http-get
+    \\ :url    "https://api.example.com/data"
+    \\ :header {:accept "application/json"}}
+;
+const result = c.eval_string(thread, expr);
+// result => "{:action :http-get, :url \"https://api.example.com/data\", ...}"
+
+// Step 2: parse the EDN/JSON, perform the action
+const response = httpGet("https://api.example.com/data");
+
+// Step 3: pass the result back into SCI
+var buf: [1024]u8 = undefined;
+const expr2 = std.fmt.bufPrintZ(
+    &buf,
+    "(process-response {{:data \"{s}\"}})",
+    .{response},
+) catch unreachable;
+const final_result = c.eval_string(thread, expr2);
+```
+
+**Host side (Go):**
+
+```go
+/*
+#cgo LDFLAGS: -L./lib -lsci
+#include "libsci.h"
+*/
+import "C"
+import "unsafe"
+
+// Step 1: eval a script that requests external action
+expr := C.CString(`{:action :http-get
+ :url    "https://api.example.com/data"
+ :header {:accept "application/json"}}`)
+defer C.free(unsafe.Pointer(expr))
+result := C.GoString(C.eval_string(thread, expr))
+// result => "{:action :http-get, :url ...}"
+
+// Step 2: parse the EDN/JSON, perform the action
+response := httpGet("https://api.example.com/data")
+
+// Step 3: pass the result back into SCI
+expr2 := C.CString(fmt.Sprintf("(process-response {:data \"%s\"})", response))
+defer C.free(unsafe.Pointer(expr2))
+finalResult := C.GoString(C.eval_string(thread, expr2))
+```
 
 ```clojure
 ;; Define action dispatcher
@@ -392,7 +446,9 @@ public final class LibSci {
                               (apply sci.impl.host-bridge/call name args))}}))
 ```
 
-**Step 4:** Host side — define callbacks and register them (Rust example):
+**Step 4:** Host side — define callbacks and register them.
+
+Rust:
 
 ```rust
 // C ABI callbacks
@@ -412,6 +468,66 @@ register_host_fn(thread, name.as_ptr(), my_add as u64);
 let name = CString::new("my-log").unwrap();
 register_host_fn(thread, name.as_ptr(), my_log as u64);
 ```
+
+Zig:
+
+```zig
+const c = @cImport({
+    @cInclude("libsci.h");
+});
+
+// C ABI callbacks
+export fn my_add(a: i64, b: i64) callconv(.C) i64 {
+    return a + b;
+}
+
+export fn my_log(msg: [*c]const u8) callconv(.C) void {
+    const s = std.mem.span(msg);
+    std.debug.print("[host] {s}\n", .{s});
+}
+
+// Register with SCI
+const name = std.fmt.allocPrintZ(allocator, "my-add", .{}) catch unreachable;
+defer allocator.free(name);
+_ = c.register_host_fn(thread, name, @intFromPtr(&my_add));
+
+const name2 = std.fmt.allocPrintZ(allocator, "my-log", .{}) catch unreachable;
+defer allocator.free(name2);
+_ = c.register_host_fn(thread, name2, @intFromPtr(&my_log));
+```
+
+Go:
+
+```go
+/*
+#cgo LDFLAGS: -L./lib -lsci
+#include "libsci.h"
+*/
+import "C"
+import "unsafe"
+
+// C ABI callbacks
+//export my_add
+func my_add(a C.long, b C.long) C.long {
+    return a + b
+}
+
+//export my_log
+func my_log(msg *C.char) {
+    fmt.Fprintf(os.Stderr, "[host] %s\n", C.GoString(msg))
+}
+
+// Register with SCI
+name := C.CString("my-add")
+defer C.free(unsafe.Pointer(name))
+C.register_host_fn(thread, name, C.long(uintptr(C.my_add)))
+
+name2 := C.CString("my-log")
+defer C.free(unsafe.Pointer(name2))
+C.register_host_fn(thread, name2, C.long(uintptr(C.my_log)))
+```
+
+Note on Go: CGo `//export` functions must be defined in the Go package (not in an imported library), and the file must be compiled with `cgo` enabled. Use `C.long` as the function pointer carrier — it matches pointer width on all 64-bit platforms.
 
 **Step 5:** SCI scripts now call host functions synchronously:
 
