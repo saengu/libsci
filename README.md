@@ -171,6 +171,116 @@ git tag v0.8.43
 git push --tags
 ```
 
+## Integrating Third-Party Libraries
+
+The prebuilt `.so`/`.dylib`/`.dll` is a **closed-world** native image — it cannot load JARs or classes at runtime. To use third-party Clojure or Java libraries, they must be compiled into the binary at build time.
+
+### Approach Overview
+
+| Method | Effort | Use Case |
+|--------|--------|----------|
+| **SCI `:namespaces` init** | Zero | Inject pure Clojure helpers in eval strings |
+| **Build-time dependency** | Medium | Embed third-party Clojure libraries into libsci |
+| **Build-time + GraalVM config** | High | Embed libraries that use Java interop or reflection |
+
+### Method 1: SCI `:namespaces` (no rebuild needed)
+
+Define utility functions inside the eval expression with `sci.core/init`:
+
+```c
+// C — inject a helper namespace and call it
+eval_string(thread,
+    "(let [ctx (sci.core/init {:namespaces "
+    "  {'my.ns {'double (fn [x] (* x 2))}}})"
+    "      result (sci.core/eval-string ctx \"(my.ns/double 21)\")]"
+    "  (str result))");
+// => "42"
+```
+
+This works with the prebuilt library and requires no rebuild. SCI's full Clojure core is available — `map`, `reduce`, `filter`, `comp`, `partial`, etc.
+
+### Method 2: Fork and add dependencies (recommended for libraries)
+
+Add third-party libraries to the SCI build and rebuild `.so`/`.dylib`/`.dll`:
+
+**Step 1:** Fork the SCI submodule and add dependencies to `sci/project.clj`:
+
+```clojure
+:dependencies [[org.clojure/clojure "1.11.1"]
+               [cheshire/cheshire "5.12.0"]   ;; JSON lib
+               [clj-http/clj-http "3.12.3"]]  ;; HTTP client
+```
+
+**Step 2:** Create a bridge namespace that references the library code. This is critical — GraalVM tree-shakes unreachable code, so you must create a code path from the `@CEntryPoint` to the library:
+
+```clojure
+;; sci/libsci/src/sci/impl/my_bridge.clj
+(ns sci.impl.my-bridge
+  (:require [cheshire.core :as json]))
+
+(defn parse-json [s]
+  (json/parse-string s true))
+```
+
+**Step 3:** Wire the bridge into `LibSci.java`:
+
+```java
+@CEntryPoint(name = "parse_json")
+public static @CConst CCharPointer parseJson(
+    @CEntryPoint.IsolateThreadContext long isolateId,
+    @CConst CCharPointer s) {
+    String expr = CTypeConversion.toJavaString(s);
+    String result = sci.impl.my_bridge.parseJson(expr);
+    // ... return C string
+}
+```
+
+**Step 4:** Use `workflow_dispatch` to trigger a build from your fork branch:
+
+```
+Actions → Release → Run workflow
+  sci_ref: my-fork/my-branch
+  release_tag: v0.8.43-custom
+```
+
+### Method 3: Java interop libraries (advanced)
+
+Libraries that use Java reflection, dynamic classloading, or native code require additional GraalVM configuration:
+
+```json
+// reflection.json — declare reflective access
+[
+  {"name": "com.example.LibraryClass", "allPublicMethods": true}
+]
+```
+
+Common GraalVM pitfalls and fixes:
+
+| Problem | Solution |
+|---------|----------|
+| `ClassNotFoundException` | Add `-H:ReflectionConfigurationFiles=reflection.json` |
+| `NoSuchMethodException` | Declare methods in `reflection.json` |
+| Missing resource files | Add `-H:IncludeResources=path/to/resource` |
+| `UnsatisfiedLinkError` (JNI) | JNI requires `-H:JNIConfigurationFiles` |
+| Build-time initialization error | Add `--initialize-at-run-time=<package>` |
+
+Not all Java libraries are GraalVM-compatible. Check [graalvm.org](https://www.graalvm.org/latest/reference-manual/native-image/metadata/) for the full metadata guide.
+
+### Babashka Pods
+
+Babashka's pod system relies on process-level IPC (stdin/stdout between the babashka binary and external processes). It is **not supported** in the libsci shared library — pods require the babashka runtime and its pod registry infrastructure.
+
+### Summary: What's possible
+
+| Feature | Prebuilt `.so` | Custom build |
+|---------|:---:|:---:|
+| Pure Clojure eval expressions | ✅ | ✅ |
+| SCI `:namespaces` injection | ✅ | ✅ |
+| Clojure libraries (pure code) | ❌ | ✅ |
+| Clojure libraries (Java interop) | ❌ | ⚠️ needs GraalVM config |
+| Babashka pods | ❌ | ❌ |
+| Runtime JAR loading | ❌ | ❌ |
+
 ## License
 
 - Build scripts: MIT (this project)
