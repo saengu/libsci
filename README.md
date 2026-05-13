@@ -281,6 +281,203 @@ Babashka's pod system relies on process-level IPC (stdin/stdout between the baba
 | Babashka pods | ❌ | ❌ |
 | Runtime JAR loading | ❌ | ❌ |
 
+## Calling Host Functions from SCI Scripts
+
+The prebuilt `.so` is a closed-world native image — SCI scripts running inside it cannot call arbitrary functions defined in the host application (Rust, Zig, Go, C, etc.). Below are three ways to bridge the gap.
+
+### Approach Overview
+
+| Method | Requires rebuild | Call style | Complex types | Best for |
+|--------|:---:|------|:---:|------|
+| **Data protocol** | ❌ No | Async (two-step eval) | Simple EDN/JSON | Occasional external calls |
+| **Function pointer registry** | ✅ Yes | Sync (direct call) | Primitive types | Most use cases |
+| **GraalVM C API** | ✅ Yes | Sync (direct call) | Structs, pointers | Complex host interaction |
+
+---
+
+### Method 1: Data protocol (no rebuild needed)
+
+The SCI script returns a data structure describing what to do. The host parses it, executes, and passes the result back in the next eval. No modification to libsci required.
+
+**Host side (Rust):**
+
+```rust
+// Step 1: eval a script that requests external action
+let expr = r#"
+    {:action :http-get
+     :url    "https://api.example.com/data"
+     :header {:accept "application/json"}}
+"#;
+let result = eval_string(thread, expr);
+// result => "{:action :http-get, :url \"https://api.example.com/data\", ...}"
+
+// Step 2: parse the EDN/JSON, perform the action
+let response = http_get("https://api.example.com/data");
+
+// Step 3: pass the result back into SCI
+let expr2 = format!("(process-response {:data \"{}\"})", response);
+let final_result = eval_string(thread, expr2);
+```
+
+**SCI script side:**
+
+```clojure
+;; Define action dispatcher
+(defn process-response [{:keys [data]}]
+  (let [parsed (json/parse data)]
+    (str "Got " (count parsed) " items")))
+```
+
+This works with the prebuilt library. The downside: each round-trip requires serializing across the C boundary, and it's inherently asynchronous — SCI cannot call `(http-get ...)` inline.
+
+---
+
+### Method 2: Function pointer registry (recommended)
+
+Register host C function pointers into SCI, then SCI scripts call them as if they were local functions. Requires a custom build of libsci.
+
+**Step 1:** Add a function registry to `LibSci.java`:
+
+```java
+// sci/libsci/src/sci/impl/LibSci.java
+import java.util.concurrent.ConcurrentHashMap;
+
+public final class LibSci {
+
+    // Host-registered callbacks: function name → C function pointer (as long)
+    private static final ConcurrentHashMap<String, Long> hostFns = 
+        new ConcurrentHashMap<>();
+
+    // Called from host side to register a callback
+    @CEntryPoint(name = "register_host_fn")
+    public static void registerHostFn(
+        @CEntryPoint.IsolateThreadContext long isolateId,
+        @CConst CCharPointer name,
+        long fnPtr
+    ) {
+        hostFns.put(CTypeConversion.toJavaString(name), fnPtr);
+    }
+
+    // Called from SCI scripts via Java interop
+    public static Object callHostFn(String name, Object... args) {
+        Long ptr = hostFns.get(name);
+        if (ptr == null) {
+            throw new RuntimeException("Unknown host function: " + name);
+        }
+        return invokeCFunction(ptr, args);
+    }
+
+    private static native Object invokeCFunction(long ptr, Object... args);
+}
+```
+
+**Step 2:** Define C callback signatures in SCI's reflection config and bridge namespace:
+
+```clojure
+;; sci/libsci/src/sci/impl/host_bridge.clj
+(ns sci.impl.host-bridge)
+
+(defn call [name & args]
+  (apply sci.impl.LibSci/callHostFn name args))
+```
+
+**Step 3:** When initializing SCI, expose the bridge via `:bindings`:
+
+```clojure
+;; Inside your build or eval initialization
+(def ctx
+  (sci.core/init
+    {:classes {'host-fn sci.impl.LibSci}
+     :bindings {'host-call (fn [name & args]
+                              (apply sci.impl.host-bridge/call name args))}}))
+```
+
+**Step 4:** Host side — define callbacks and register them (Rust example):
+
+```rust
+// C ABI callbacks
+extern "C" fn my_add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+extern "C" fn my_log(msg: *const c_char) {
+    let s = unsafe { CStr::from_ptr(msg).to_str().unwrap() };
+    eprintln!("[host] {}", s);
+}
+
+// Register with SCI
+let name = CString::new("my-add").unwrap();
+register_host_fn(thread, name.as_ptr(), my_add as u64);
+
+let name = CString::new("my-log").unwrap();
+register_host_fn(thread, name.as_ptr(), my_log as u64);
+```
+
+**Step 5:** SCI scripts now call host functions synchronously:
+
+```clojure
+(host-call "my-add" 3 4)        ;; => 7
+(host-call "my-log" "hello!")   ;; prints [host] hello! in host process
+
+;; Use host functions in SCI data pipelines
+(->> [1 2 3 4 5]
+     (map #(host-call "my-add" % 10)))
+;; => (11 12 13 14 15)
+```
+
+**Step 6:** Build via workflow_dispatch pointing at your fork:
+
+```
+Actions → Release → Run workflow
+  sci_ref: your-fork/my-branch
+  release_tag: v0.8.43-hostfn
+```
+
+---
+
+### Method 3: GraalVM C API (for complex types)
+
+When callbacks involve structs, arrays, or custom C types beyond primitives, use GraalVM's `CFunctionPointer`:
+
+```java
+import org.graalvm.nativeimage.c.function.CFunction;
+import org.graalvm.nativeimage.c.type.CFunctionPointer;
+import org.graalvm.nativeimage.c.type.CCharPointer;
+import org.graalvm.nativeimage.c.struct.CStruct;
+import org.graalvm.nativeimage.c.struct.CField;
+
+// Declare a struct mirroring the C side
+@CStruct("my_point_t")
+interface MyPoint extends PointerBase {
+    @CField("x") double getX();
+    @CField("x") void setX(double value);
+    @CField("y") double getY();
+    @CField("y") void setY(double value);
+}
+
+// Declare the callback signature
+interface PointCallback extends CFunctionPointer {
+    @CFunction
+    double invoke(MyPoint point);
+}
+```
+
+This gives full type safety but requires more GraalVM-specific boilerplate.
+
+---
+
+### Comparison
+
+| Characteristic | Data protocol | Fn pointer registry | C API |
+|---|---|---|---|
+| Prebuilt `.so` | ✅ | ❌ | ❌ |
+| SCI calls host inline | ❌ (two-step) | ✅ | ✅ |
+| Primitives (int, long, pointer) | ✅ | ✅ | ✅ |
+| C structs | ❌ | ❌ | ✅ |
+| Sync return value | ❌ | ✅ | ✅ |
+| Multiple callbacks | ✅ | ✅ | ✅ |
+| Build complexity | None | Medium | High |
+
 ## License
 
 - Build scripts: MIT (this project)
