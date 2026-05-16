@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       sci_ref:
-        description: 'SCI branch, tag, or commit to build'
+        description: 'babashka/sci branch, tag, or commit to build'
         required: false
         default: ''
         type: string
@@ -47,13 +47,14 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Switch SCI to specified ref
+      - name: Switch babashka/sci to specified ref
         if: ${{ inputs.sci_ref != '' }}
         working-directory: sci
         run: |
-          git fetch origin
+          # Force fetch tags specifically for this submodule remote
+          git fetch origin --tags
           git checkout "${{ inputs.sci_ref }}"
-          echo "SCI ref: $(git rev-parse --short HEAD)"
+          echo "babashka/sci ref: $(git rev-parse --short HEAD)"
 
       - uses: graalvm/setup-graalvm@v1
         with:
