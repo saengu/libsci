@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       sci_ref:
-        description: 'SCI branch, tag, or commit to build'
+        description: 'babashka/sci branch, tag, or commit to build'
         required: true
         type: string
       release_tag:
@@ -49,13 +49,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Switch SCI to specified ref (manual trigger)
+      - name: Switch babashka/sci to specified ref (manual trigger)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         working-directory: sci
         run: |
-          git fetch origin
+          git fetch origin --tags
           git checkout "${{ inputs.sci_ref }}"
-          echo "SCI ref: $(git rev-parse --short HEAD)"
+          echo "babashka/sci ref: $(git rev-parse --short HEAD)"
 
       - uses: graalvm/setup-graalvm@v1
         with:
