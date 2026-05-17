@@ -29,7 +29,7 @@ jobs:
             arch: aarch64
 
           - name: macos-x86_64
-            os: macos-15
+            os: macos-15-intel
             arch: x86_64
 
           - name: macos-aarch64
@@ -106,7 +106,7 @@ jobs:
           - name: linux-aarch64
             os: ubuntu-24.04-arm
           - name: macos-x86_64
-            os: macos-15
+            os: macos-15-intel
           - name: macos-aarch64
             os: macos-latest
     runs-on: ${{ matrix.os }}
