@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       sci_ref:
-        description: 'babashka/sci branch, tag, or commit to build'
+        description: "babashka/sci branch, tag, or commit to build"
         required: false
-        default: ''
+        default: ""
         type: string
 
 jobs:
@@ -48,9 +48,9 @@ jobs:
           submodules: recursive
 
       - name: Initialize local submodule commits
-	run: |
-	  git submodule init
-	  git submodule update --init --recursive
+        run: |
+          git submodule init
+          git submodule update --init --recursive
 
       - name: Switch babashka/sci to specified ref
         if: ${{ inputs.sci_ref != '' }}
@@ -63,16 +63,16 @@ jobs:
 
       - uses: graalvm/setup-graalvm@v1
         with:
-          java-version: '21'
-          distribution: 'graalvm'
-          components: 'native-image'
+          java-version: "21"
+          distribution: "graalvm"
+          components: "native-image"
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Clojure tools
         uses: DeLaGuardo/setup-clojure@12.5
         with:
-          lein: '2.11.2'
-          bb: 'latest'
+          lein: "2.11.2"
+          bb: "latest"
 
       - name: Cache Maven dependencies
         uses: actions/cache@v4

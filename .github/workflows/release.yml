@@ -3,15 +3,15 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       sci_ref:
-        description: 'babashka/sci branch, tag, or commit to build'
+        description: "babashka/sci branch, tag, or commit to build"
         required: false
         type: string
       release_tag:
-        description: 'Release tag (e.g. v0.1.0)'
+        description: "Release tag (e.g. v0.1.0)"
         required: true
         type: string
 
@@ -64,16 +64,16 @@ jobs:
 
       - uses: graalvm/setup-graalvm@v1
         with:
-          java-version: '21'
-          distribution: 'graalvm'
-          components: 'native-image'
+          java-version: "21"
+          distribution: "graalvm"
+          components: "native-image"
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Clojure tools
         uses: DeLaGuardo/setup-clojure@12.5
         with:
-          lein: '2.11.2'
-          bb: 'latest'
+          lein: "2.11.2"
+          bb: "latest"
 
       - name: Cache Maven dependencies
         uses: actions/cache@v4
