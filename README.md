@@ -44,7 +44,15 @@ int graal_tear_down_isolate(graal_isolatethread_t* thread);
 
 ## Usage Examples
 
-### C
+The prebuilt library uses `@rpath` as its install name on macOS (`@rpath/libsci.dylib`). On Linux the SONAME is `libsci.so`, and on Windows the DLL is loaded by filename. You can make the library discoverable either at **link time** (by embedding an rpath) or at **runtime** (via environment variables).
+
+| OS | Link-time flag | Runtime env var |
+|---|---|---|
+| macOS | `-Wl,-rpath,./lib` | `DYLD_LIBRARY_PATH=./lib` |
+| Linux | `-Wl,-rpath,./lib` | `LD_LIBRARY_PATH=./lib` |
+| Windows | (link against `.lib`) | `PATH` (include DLL dir) |
+
+### C (C99 or later)
 
 ```c
 #include "libsci.h"
@@ -59,12 +67,36 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-### Rust
+Build with rpath (recommended):
+
+```bash
+# macOS
+gcc -o myapp main.c -L./lib -I./include -lsci -Wl,-rpath,./lib
+
+# Linux
+gcc -o myapp main.c -L./lib -I./include -lsci -Wl,-rpath,./lib
+```
+
+Or use the runtime env var:
+
+```bash
+# macOS
+gcc -o myapp main.c -L./lib -I./include -lsci
+DYLD_LIBRARY_PATH=./lib ./myapp "(+ 1 2)"
+
+# Linux
+gcc -o myapp main.c -L./lib -I./include -lsci
+LD_LIBRARY_PATH=./lib ./myapp "(+ 1 2)"
+```
+
+### Rust (edition 2021)
 
 ```rust
 // build.rs
 println!("cargo:rustc-link-search=native=./lib");
 println!("cargo:rustc-link-lib=sci");
+// macOS/Linux: embed rpath so the library is found at runtime
+println!("cargo:rustc-link-arg=-Wl,-rpath,./lib");
 
 // src/main.rs — bindgen or manual FFI
 extern "C" {
@@ -74,12 +106,20 @@ extern "C" {
 }
 ```
 
-### Zig
+### Zig (0.16)
+
+build.zig:
 
 ```zig
-const c = @cImport({
-    @cInclude("libsci.h");
-});
+// Link against libsci and set rpath
+exe.addLibraryPath(b.path("lib"));
+exe.linkSystemLibrary("sci");
+exe.addRPath(b.path("lib"));
+```
+
+```zig
+// main.zig
+const c = @import("libsci");
 
 var isolate: ?*c.graal_isolate_t = null;
 var thread: ?*c.graal_isolatethread_t = null;
@@ -88,11 +128,11 @@ const result = c.eval_string(thread, "(+ 1 2)");
 defer _ = c.graal_tear_down_isolate(thread);
 ```
 
-### Go
+### Go (1.21+)
 
 ```go
 /*
-#cgo LDFLAGS: -L./lib -lsci
+#cgo LDFLAGS: -L./lib -lsci -Wl,-rpath,./lib
 #include "libsci.h"
 */
 import "C"
@@ -109,16 +149,95 @@ func main() {
 }
 ```
 
-### Python
+### Python (3.8+)
 
 ```python
+import platform
 from ctypes import CDLL, c_char_p, c_void_p, byref
 
-dll = CDLL("./lib/libsci.so")   # or .dylib / .dll
+# Platform-appropriate library name
+lib_name = {"Darwin": "./lib/libsci.dylib", "Linux": "./lib/libsci.so", "Windows": "./lib/libsci.dll"}
+dll = CDLL(lib_name[platform.system()])
+
 isolate, thread = c_void_p(), c_void_p()
 dll.graal_create_isolate(None, byref(isolate), byref(thread))
 dll.eval_string.restype = c_char_p
 print(dll.eval_string(thread, c_char_p(b"(+ 1 2)")))
+```
+
+### Swift (6.3)
+
+Swift 6.3's `@c` block imports C headers directly in Swift source — no bridging header or module map needed.
+
+```swift
+// main.swift
+@c { """
+#include "libsci.h"
+""" }
+
+var isolate: UnsafeMutablePointer<graal_isolate_t>? = nil
+var thread: UnsafeMutablePointer<graal_isolatethread_t>? = nil
+
+graal_create_isolate(nil, &isolate, &thread)
+defer { graal_tear_down_isolate(thread) }
+
+let expr = "(+ 1 2)"
+if let result = eval_string(thread, expr) {
+    print(String(cString: result))
+}
+```
+
+Build with `swiftc`:
+
+```bash
+# macOS
+swiftc -o myapp main.swift -I./include -L./lib -lsci \
+  -Xlinker -rpath -Xlinker @loader_path/lib
+
+# Linux
+swiftc -o myapp main.swift -I./include -L./lib -lsci \
+  -Xlinker -rpath -Xlinker '$ORIGIN/lib'
+```
+
+Or with SwiftPM (`Package.swift`):
+
+```swift
+// swift-tools-version: 6.3
+import PackageDescription
+
+let package = Package(
+    name: "myapp",
+    targets: [
+        .executableTarget(
+            name: "myapp",
+            path: ".",
+            sources: ["main.swift"],
+            cSettings: [.headerSearchPath("include")],
+            linkerSettings: [
+                .linkedLibrary("sci"),
+                .unsafeFlags(["-L", "lib"]),
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@loader_path/lib"])
+            ]
+        )
+    ]
+)
+```
+
+When implementing C callback interfaces (e.g., for the function pointer registry in the host functions section), use `@implement` to create a C-callable function pointer from a Swift struct:
+
+```swift
+@c { """
+#include "libsci.h"
+""" }
+
+@implement(CFunctionPointer)
+struct MyCallback {
+    func call(x: Int64, y: Int64) -> Int64 { x + y }
+}
+
+// .pointer gives the C function pointer to pass across FFI
+let cb = MyCallback()
+register_host_fn(thread, "my-callback", UInt64(bitPattern: cb.pointer))
 ```
 
 ## How It Works
@@ -322,9 +441,9 @@ let final_result = eval_string(thread, expr2);
 **Host side (Zig):**
 
 ```zig
-// build.zig — translate C header (Zig 0.16 replaces @cImport):
+// build.zig — translate C header (Zig 0.16):
 // const translate = b.addTranslateC(.{
-//     .root_source_file = b.path("libsci/target/include/libsci.h"),
+//     .root_source_file = b.path("include/libsci.h"),
 //     .target = target,
 //     .optimize = optimize,
 // });
@@ -379,6 +498,30 @@ response := httpGet("https://api.example.com/data")
 expr2 := C.CString(fmt.Sprintf("(process-response {:data \"%s\"})", response))
 defer C.free(unsafe.Pointer(expr2))
 finalResult := C.GoString(C.eval_string(thread, expr2))
+```
+
+**Host side (Swift 6.3):**
+
+```swift
+@c { """
+#include "libsci.h"
+""" }
+
+// Step 1: eval a script that requests external action
+let expr = """
+{:action :http-get
+ :url    "https://api.example.com/data"
+ :header {:accept "application/json"}}
+"""
+let result = eval_string(thread, expr).map { String(cString: $0) }
+// result => "{:action :http-get, :url \"https://api.example.com/data\", ...}"
+
+// Step 2: parse the EDN/JSON, perform the action
+let response = httpGet("https://api.example.com/data")
+
+// Step 3: pass the result back into SCI
+let expr2 = "(process-response {:data \"\(response)\"})"
+let finalResult = eval_string(thread, expr2).map { String(cString: $0) }
 ```
 
 ```clojure
@@ -478,9 +621,9 @@ register_host_fn(thread, name.as_ptr(), my_log as u64);
 Zig:
 
 ```zig
-// build.zig — translate C header (Zig 0.16 replaces @cImport):
+// build.zig — translate C header (Zig 0.16):
 // const translate = b.addTranslateC(.{
-//     .root_source_file = b.path("libsci/target/include/libsci.h"),
+//     .root_source_file = b.path("include/libsci.h"),
 //     .target = target,
 //     .optimize = optimize,
 // });
@@ -538,6 +681,40 @@ name2 := C.CString("my-log")
 defer C.free(unsafe.Pointer(name2))
 C.register_host_fn(thread, name2, C.long(uintptr(C.my_log)))
 ```
+
+Swift (6.3):
+
+```swift
+@c { """
+#include "libsci.h"
+""" }
+
+// Swift 6.3: @implement creates C-compatible function pointer types
+@implement(CFunctionPointer)
+struct AddCallback {
+    func call(a: Int64, b: Int64) -> Int64 {
+        return a + b
+    }
+}
+
+@implement(CFunctionPointer)
+struct LogCallback {
+    func call(msg: UnsafePointer<CChar>?) {
+        if let msg = msg {
+            print("[host] \(String(cString: msg))", to: &stderr)
+        }
+    }
+}
+
+// Register with SCI
+let addCb = AddCallback()
+register_host_fn(thread, "my-add", UInt64(bitPattern: addCb.pointer))
+
+let logCb = LogCallback()
+register_host_fn(thread, "my-log", UInt64(bitPattern: logCb.pointer))
+```
+
+Note on Swift: `@implement(CFunctionPointer)` generates a C-callable function pointer from the struct's `call` method, with the raw pointer accessible via `.pointer`.
 
 Note on Go: CGo `//export` functions must be defined in the Go package (not in an imported library), and the file must be compiled with `cgo` enabled. Use `C.long` as the function pointer carrier — it matches pointer width on all 64-bit platforms.
 
