@@ -47,6 +47,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Initialize local submodule commits
+	run: |
+	  git submodule init
+	  git submodule update --init --recursive
+
       - name: Switch babashka/sci to specified ref
         if: ${{ inputs.sci_ref != '' }}
         working-directory: sci
