@@ -80,6 +80,10 @@ jobs:
         working-directory: sci
         run: bb libsci:compile
 
+      - name: Fix macOS dylib install name
+        if: runner.os == 'macOS'
+        run: install_name_tool -id "@rpath/libsci.dylib" sci/libsci/target/libsci.dylib
+
       - name: List build artifacts
         shell: bash
         run: ls -la sci/libsci/target/
@@ -106,7 +110,7 @@ jobs:
           - name: linux-aarch64
             os: ubuntu-24.04-arm
           - name: macos-x86_64
-            os: macos-15-intel
+            os: macos-15
           - name: macos-aarch64
             os: macos-latest
     runs-on: ${{ matrix.os }}
