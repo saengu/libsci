@@ -8,7 +8,7 @@ on:
     inputs:
       sci_ref:
         description: "babashka/sci branch/tag/commit to build"
-        required: false
+        required: true
         type: string
       bridge_ref:
         description: "apply host bridge patch"
