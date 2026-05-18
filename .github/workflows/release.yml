@@ -7,11 +7,16 @@ on:
   workflow_dispatch:
     inputs:
       sci_ref:
-        description: "babashka/sci branch, tag, or commit to build"
+        description: "babashka/sci branch/tag/commit to build"
         required: false
         type: string
+      bridge_ref:
+        description: "apply host bridge patch"
+        required: false
+        default: "true"
+        type: string
       release_tag:
-        description: "Release tag (e.g. v0.1.0)"
+        description: "release tag (e.g. v0.1.0)"
         required: true
         type: string
 
@@ -45,13 +50,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout parent repo
+      - name: Checkout parent repo and submodules
         uses: actions/checkout@v4
-
-      - name: Initialize local submodule commits
-        run: |
-          git submodule init
-          git submodule update --init --recursive
+        with:
+          submodules: recursive
 
       - name: Switch babashka/sci to specified ref (manual trigger)
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -60,6 +62,12 @@ jobs:
           git fetch origin --tags
           git checkout "${{ inputs.sci_ref }}"
           echo "babashka/sci ref: $(git rev-parse --short HEAD)"
+
+      - name: Apply patch inside submodule directory
+        if: ${{ inputs.bridge_ref == 'true' }}
+        working-directory: sci
+        run: |
+          git apply ../patches/host_bridge.patch
 
       - uses: graalvm/setup-graalvm@v1
         with:
