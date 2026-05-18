@@ -45,9 +45,8 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Checkout parent repo
+        uses: actions/checkout@v4
 
       - name: Initialize local submodule commits
         run: |
