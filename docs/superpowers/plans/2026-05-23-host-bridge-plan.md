@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add persistent SCI context and host function dispatch to libsci so host languages can load scripts, call their functions, and receive callbacks — all without rebuilding libsci.
+**Goal:** Add persistent SCI context and host function dispatch to libsci so host languages can load scripts, call their functions, and receive callbacks -- all without rebuilding libsci.
 
-**Architecture:** Three layers — C @CEntryPoints (`LibSciHost.java`), Clojure bridge (`libsci_host.clj` with per-thread context map), and host-language dispatcher (single C function pointer registered once). JSON wire format for host-call, EDN for call_function args. CFunctionPointer via direct cast `(HostDispatcher) WordFactory.pointer(ptr)`.
+**Architecture:** Three layers -- C @CEntryPoints (`LibSciHost.java`), Clojure bridge (`libsci_host.clj` with per-thread context map), and host-language dispatcher (single C function pointer registered once). JSON wire format for host-call, EDN for call_function args. CFunctionPointer via direct cast `(HostDispatcher) WordFactory.pointer(ptr)`.
 
 **Tech Stack:** GraalVM 23 CE native-image --shared, babashka/sci, Cheshire JSON, Leiningen, Java, Clojure
 
@@ -99,7 +99,7 @@ Run from `/root/libsci/sci`:
 lein with-profiles +libsci test libsci-host-test
 ```
 
-Expected: FAIL — `sci.impl.libsci-host` not found (not implemented yet).
+Expected: FAIL -- `sci.impl.libsci-host` not found (not implemented yet).
 
 ---
 
@@ -123,7 +123,7 @@ import org.graalvm.word.WordFactory;
 
 public final class LibSciHost {
 
-    // ── Host dispatcher interface ──
+    // -- Host dispatcher interface --
     // @CFunction tells GraalVM to generate the calling trampoline at build time.
     // Direct cast (HostDispatcher) WordFactory.pointer(ptr) replaces the runtime
     // toProxy() call that failed in native-image --shared builds.
@@ -132,12 +132,12 @@ public final class LibSciHost {
         CCharPointer dispatch(CCharPointer jsonArgs);
     }
 
-    // ── Static dispatcher pointer ──
+    // -- Static dispatcher pointer --
     // volatile guarantees visibility across threads.
     // WordFactory.nullPointer() = null pointer (isNull() returns true).
     private static volatile HostDispatcher dispatcher = WordFactory.nullPointer();
 
-    // ── Set host dispatcher (C entry point) ──
+    // -- Set host dispatcher (C entry point) --
     // Called once by the host at startup with a C function pointer address.
     @CEntryPoint(name = "set_host_dispatcher")
     public static void setHostDispatcher(
@@ -146,7 +146,7 @@ public final class LibSciHost {
         dispatcher = (HostDispatcher) WordFactory.pointer(fnPtr);
     }
 
-    // ── Internal: dispatch a host-call from Clojure ──
+    // -- Internal: dispatch a host-call from Clojure --
     // Called by sci.impl.libsci-host/-host-call-impl.
     // Returns a JSON string: {"status":"ok","value":...} or error envelope.
     public static String dispatchHostCall(String argsJson) {
@@ -166,7 +166,7 @@ public final class LibSciHost {
         }
     }
 
-    // ── Persistent context entry points ──
+    // -- Persistent context entry points --
 
     @CEntryPoint(name = "load_script")
     public static @CConst CCharPointer loadScript(
@@ -203,7 +203,7 @@ public final class LibSciHost {
         sci.impl.libsci_host.resetContext();
     }
 
-    // ── Re-eval entry point (renamed from eval_string) ──
+    // -- Re-eval entry point (renamed from eval_string) --
 
     @CEntryPoint(name = "eval")
     public static @CConst CCharPointer eval(
@@ -214,7 +214,7 @@ public final class LibSciHost {
         return returnCString(result);
     }
 
-    // ── Helper: Java String → CCharPointer ──
+    // -- Helper: Java String -> CCharPointer --
     private static CCharPointer returnCString(String s) {
         CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(s);
         return holder.get();
@@ -248,7 +248,7 @@ lein with-profiles +libsci compile
              ^{:static true} [evalInContext  [String] String]
              ^{:static true} [resetContext   [] void]]))
 
-;; ── Per-thread context registry ──
+;; -- Per-thread context registry --
 ;; Each OS thread gets its own SCI context. Thread A's defs are invisible to
 ;; Thread B, and vice versa. Keyed by JVM thread ID (.getId on Thread).
 
@@ -273,7 +273,7 @@ lein with-profiles +libsci compile
       (set-ctx! new-ctx)
       new-ctx)))
 
-;; ── Base SCI options ──
+;; -- Base SCI options --
 ;; defonce ensures the map and closure are created once at load time, not on
 ;; every call. The closure captures no mutable external state.
 
@@ -293,7 +293,7 @@ lein with-profiles +libsci compile
                                           (.getMessage e))}))
                     raw-result)))}})
 
-;; ── Public API ──
+;; -- Public API --
 
 (defn -loadScript
   "Load a Clojure script into the current thread's persistent SCI context.
@@ -356,7 +356,7 @@ Expected: Compilation succeeds including both `sci.impl.libsci` and `sci.impl.li
 
 ---
 
-### Task 4: Modify project.clj — AOT config
+### Task 4: Modify project.clj -- AOT config
 
 **Files:**
 - Modify: `sci/project.clj` line 34
@@ -380,7 +380,7 @@ lein with-profiles +libsci compile
 
 ---
 
-### Task 5: Modify libsci_tasks.clj — javac command
+### Task 5: Modify libsci_tasks.clj -- javac command
 
 **Files:**
 - Modify: `sci/libsci/bb/libsci_tasks.clj` lines 44-46
