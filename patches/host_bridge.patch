@@ -79,65 +79,61 @@ index cfe15fc..e6f86b1 100644
  }
 diff --git a/libsci/src/sci/impl/LibSciHost.java b/libsci/src/sci/impl/LibSciHost.java
 new file mode 100644
-index 0000000..873fc1f
+index 0000000..03bd9c2
 --- /dev/null
 +++ b/libsci/src/sci/impl/LibSciHost.java
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,45 @@
 +package sci.impl;
 +
 +import org.graalvm.nativeimage.c.function.CEntryPoint;
++import org.graalvm.nativeimage.c.function.CFunction;
 +import org.graalvm.nativeimage.c.type.CCharPointer;
-+import org.graalvm.nativeimage.c.type.CConst;
 +import org.graalvm.nativeimage.c.type.CTypeConversion;
-+
-+import java.util.UUID;
-+import java.util.concurrent.ConcurrentHashMap;
++import org.graalvm.word.Pointer;
++import org.graalvm.word.WordFactory;
 +
 +public final class LibSciHost {
 +
-+    private static final ConcurrentHashMap<String, String> pendingCalls = new ConcurrentHashMap<>();
-+    private static final ConcurrentHashMap<String, String> callResults = new ConcurrentHashMap<>();
++    private static volatile long dispatcherPtr = 0;
 +
-+    public static String registerCall(String argsJson) {
-+        String id = UUID.randomUUID().toString();
-+        pendingCalls.put(id, argsJson);
-+        return id;
++    @CEntryPoint(name = "set_host_dispatcher")
++    public static void setHostDispatcher(
++            @CEntryPoint.IsolateThreadContext long isolateId,
++            long fnPtr) {
++        dispatcherPtr = fnPtr;
 +    }
 +
-+    public static String consumeResult(String id) {
-+        return callResults.remove(id);
-+    }
++    // Imported from host: calls through a C function pointer.
++    // The HOST application must define this function.
++    @CFunction("callPtr")
++    static native Pointer callPtr(long fnPtr, Pointer argPtr);
 +
-+    @CEntryPoint(name = "get_pending_host_call")
-+    public static @CConst CCharPointer getPendingHostCall(
-+            @CEntryPoint.IsolateThreadContext long tid,
-+            @CConst CCharPointer idCStr) {
-+        String id = CTypeConversion.toJavaString(idCStr);
-+        String data = pendingCalls.get(id);
-+        if (data == null) data = "{\"status\":\"not_found\"}";
-+        CTypeConversion.CCharPointerHolder h = CTypeConversion.toCString(data);
-+        return h.get();
-+    }
-+
-+    @CEntryPoint(name = "deliver_host_call_result")
-+    public static @CConst CCharPointer deliverHostCallResult(
-+            @CEntryPoint.IsolateThreadContext long tid,
-+            @CConst CCharPointer idCStr,
-+            @CConst CCharPointer resultCStr) {
-+        String id = CTypeConversion.toJavaString(idCStr);
-+        String result = CTypeConversion.toJavaString(resultCStr);
-+        pendingCalls.remove(id);
-+        callResults.put(id, result);
-+        CTypeConversion.CCharPointerHolder h = CTypeConversion.toCString("{\"status\":\"ok\"}");
-+        return h.get();
++    @SuppressWarnings("cast")
++    public static String dispatchHostCall(String argsJson) {
++        long ptr = dispatcherPtr;
++        if (ptr == 0) {
++            return "{\"status\":\"error\","
++                 + "\"message\":\"No host dispatcher registered.\"}";
++        }
++        try {
++            CTypeConversion.CCharPointerHolder holder =
++                CTypeConversion.toCString(argsJson);
++            Pointer resultPtr = callPtr(ptr, (Pointer) holder.get());
++            CCharPointer result = (CCharPointer) resultPtr;
++            return CTypeConversion.toJavaString(result);
++        } catch (Exception e) {
++            return "{\"status\":\"error\","
++                 + "\"message\":\"dispatcher call failed: "
++                 + e.getMessage() + "\"}";
++        }
 +    }
 +}
 diff --git a/libsci/src/sci/impl/libsci_host.clj b/libsci/src/sci/impl/libsci_host.clj
 new file mode 100644
-index 0000000..9e15603
+index 0000000..cdd3d95
 --- /dev/null
 +++ b/libsci/src/sci/impl/libsci_host.clj
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,82 @@
 +(ns sci.impl.libsci-host
 +  (:require [cheshire.core :as json]
 +            [sci.core :as sci])
@@ -155,9 +151,9 @@ index 0000000..9e15603
 +(defn- set-ctx! [ctx]
 +  (swap! contexts assoc (.getId (Thread/currentThread)) ctx))
 +
-+(defn- register-host-call [args-json]
++(defn- dispatch-host-call [args-json]
 +  (let [cls  (Class/forName "sci.impl.LibSciHost")
-+        meth (.getMethod cls "registerCall" (into-array Class [String]))]
++        meth (.getMethod cls "dispatchHostCall" (into-array Class [String]))]
 +    (.invoke meth nil (into-array Object [args-json]))))
 +
 +(defonce base-opts
@@ -166,8 +162,15 @@ index 0000000..9e15603
 +                 'parse-string    json/parse-string}}
 +   :bindings {'host-call
 +              (fn [& args]
-+                (let [args-json (json/generate-string (vec args))]
-+                  (register-host-call args-json)))}})
++                (let [args-json  (json/generate-string (vec args))
++                      raw-result (dispatch-host-call args-json)]
++                  (if (string? raw-result)
++                    (try (json/parse-string raw-result true)
++                         (catch Exception e
++                           {:status "error"
++                            :message (str "Failed to parse host response: "
++                                          (.getMessage e))}))
++                    raw-result)))}})
 +
 +(defn- get-or-init-ctx []
 +  (if-let [ctx (get-ctx)]
@@ -227,18 +230,15 @@ index 7bcc555..173855b 100644
    :deploy-repositories [["clojars" {:url "https://clojars.org/repo"
                                      :username :env/clojars_user
 diff --git a/reflection.json b/reflection.json
-index bc9c591..83e41c8 100644
+index bc9c591..1fe43ff 100644
 --- a/reflection.json
 +++ b/reflection.json
-@@ -106,5 +106,10 @@
+@@ -106,5 +106,7 @@
       {"name": "aset"},
       {"name": "aclone"}
     ]},
 -  {"name": "[Ljava.lang.Double;"}
 +  {"name": "[Ljava.lang.Double;"},
 +  {"name": "sci.impl.LibSciHost",
-+   "methods": [
-+     {"name":"registerCall","parameterTypes":["java.lang.String"]},
-+     {"name":"consumeResult","parameterTypes":["java.lang.String"]}
-+   ]}
++   "methods": [{"name":"dispatchHostCall","parameterTypes":["java.lang.String"]}]}
  ]

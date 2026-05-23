@@ -25,6 +25,14 @@ macro_rules! test {
     }};
 }
 
+// callPtr: imported by libsci.so via @CFunction static native.
+// The host MUST provide this symbol as extern "C".
+#[no_mangle]
+pub extern "C" fn callPtr(fn_ptr: i64, arg_ptr: i64) -> i64 {
+    let disp: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(fn_ptr) };
+    disp(arg_ptr)
+}
+
 unsafe fn c_str(s: &str) -> *const c_char {
     CString::new(s).unwrap().into_raw()
 }
@@ -40,13 +48,27 @@ unsafe fn create_isolate() -> *mut graal_isolatethread_t {
     thread
 }
 
+unsafe extern "C" fn host_dispatcher(json_args: *const c_char) -> *const c_char {
+    CString::new("{\"status\":\"ok\",\"value\":7}").unwrap().into_raw()
+}
+
 fn main() {
     println!("libsci host bridge Rust integration tests");
     println!("-----------------------------------------");
 
+    test!("set_host_dispatcher", {
+        unsafe {
+            let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
+            graal_tear_down_isolate(thread);
+        }
+        true
+    });
+
     test!("load_and_call", {
         unsafe {
             let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
             load_script(thread as i64, c_str("(defn add [x y] (+ x y))"));
             let r = from_c_str(call_function(thread as i64, c_str("add"), c_str("3 4")));
             graal_tear_down_isolate(thread);
@@ -57,6 +79,7 @@ fn main() {
     test!("eval_in_context", {
         unsafe {
             let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
             load_script(thread as i64, c_str("(def x 42)"));
             let r = from_c_str(eval_in_context(thread as i64, c_str("x")));
             graal_tear_down_isolate(thread);
@@ -67,6 +90,7 @@ fn main() {
     test!("eval_fresh_context", {
         unsafe {
             let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
             let r1 = from_c_str(eval(thread as i64, c_str("(def x 42)")));
             let r2 = from_c_str(eval(thread as i64,
                 c_str("(try x (catch Exception e \"err\"))")));
@@ -78,6 +102,7 @@ fn main() {
     test!("reset_context", {
         unsafe {
             let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
             load_script(thread as i64, c_str("(def x 1)"));
             reset_context(thread as i64);
             let r = from_c_str(call_function(thread as i64, c_str("add"), c_str("1 2")));
@@ -86,19 +111,22 @@ fn main() {
         }
     });
 
-    test!("host_call_data_protocol", {
+    test!("host_call", {
         unsafe {
             let thread = create_isolate();
-            let r = from_c_str(load_script(thread as i64,
-                c_str("(host-call \"add\" 3 4)")));
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
+            load_script(thread as i64,
+                c_str("(defn compute [x y] (host-call \"add\" x y))"));
+            let r = from_c_str(call_function(thread as i64, c_str("compute"), c_str("3 4")));
             graal_tear_down_isolate(thread);
-            r.contains("\"status\":\"ok\"") && r.contains("\"value\":\"")
+            r.contains("\"status\":\"ok\"") && r.contains(":value 7")
         }
     });
 
     test!("edn_keyword_args", {
         unsafe {
             let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
             load_script(thread as i64, c_str("(defn get-val [m k] (get m k))"));
             let r = from_c_str(call_function(
                 thread as i64, c_str("get-val"), c_str("{:a 1 :b 2} :a")));
@@ -110,6 +138,7 @@ fn main() {
     test!("cross_ns_call", {
         unsafe {
             let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
             load_script(thread as i64,
                 c_str("(ns my.ns) (defn calc [x] (* x 2))"));
             let r = from_c_str(call_function(

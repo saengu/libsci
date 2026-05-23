@@ -18,15 +18,14 @@
     (let [result (host/-evalInContext "x")]
       (is (= "42" (-> result json/parse-string (get "value")))))))
 
-(deftest host-call-returns-correlation-id
-  (testing "host-call returns a correlation ID (UUID string)"
+(deftest host-call-error-no-dispatcher
+  (testing "host-call returns error when no dispatcher registered"
     (host/-resetContext)
     (let [result  (host/-loadScript "(host-call \"add\" 3 4)")
           parsed  (json/parse-string result)
           value   (get parsed "value")]
       (is (= "ok" (get parsed "status")))
-      (is (string? value))
-      (is (= 36 (count value)) "UUID string length should be 36"))))
+      (is (str/includes? value "error") (str "expected error in value, got: " value)))))
 
 (deftest context-reset-isolation
   (testing "reset + reload gives independent state (thread isolation simulated)"
