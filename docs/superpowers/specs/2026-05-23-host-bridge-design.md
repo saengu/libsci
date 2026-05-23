@@ -1,4 +1,4 @@
-# Host Bridge Design — Persistent Context + Host Function Dispatch
+# Host Bridge Design -- Persistent Context + Host Function Dispatch
 
 - **Date**: 2026-05-23
 - **Status**: Draft (reviewed)
@@ -15,28 +15,28 @@ Three layers:
 
 ```
 Host Language (Zig/C/Rust/Go/...)
-  ┌──────────────────────────────────┐
-  │ host_dispatcher(json_args)       │  ← C function pointer
-  │   - parse JSON array             │     registered once at startup
-  │   - dispatch by name (hashmap)   │
-  │   - return JSON envelope         │
-  └──────────────┬───────────────────┘
-                 │ C function pointer
-                 ▼
+  +----------------------------------+
+  | host_dispatcher(json_args)       |  <- C function pointer
+  |   - parse JSON array             |     registered once at startup
+  |   - dispatch by name (hashmap)   |
+  |   - return JSON envelope         |
+  +--------------+-------------------+
+                 | C function pointer
+                 v
 libsci shared library (GraalVM native-image)
-  ┌─────────────────────────────────────┐
-  │ LibSciHost.java   (@CEntryPoints)   │
-  │   - HostDispatcher interface        │  ← direct cast, not toProxy()
-  │   - set_host_dispatcher / load_     │
-  │     script / call_function /        │
-  │     eval_in_context /               │
-  │     reset_context                   │
-  ├─────────────────────────────────────┤
-  │ libsci_host.clj   (Clojure bridge)  │
-  │   - ctx atom (persistent state)     │
-  │   - host-call JSON protocol         │
-  │   - base-init (cheshire + binding)  │
-  └─────────────────────────────────────┘
+  +-------------------------------------+
+  | LibSciHost.java   (@CEntryPoints)   |
+  |   - HostDispatcher interface        |  <- direct cast, not toProxy()
+  |   - set_host_dispatcher / load_     |
+  |     script / call_function /        |
+  |     eval_in_context /               |
+  |     reset_context                   |
+  +-------------------------------------+
+  | libsci_host.clj   (Clojure bridge)  |
+  |   - ctx atom (persistent state)     |
+  |   - host-call JSON protocol         |
+  |   - base-init (cheshire + binding)  |
+  +-------------------------------------+
 ```
 
 ## C API
@@ -58,15 +58,15 @@ All `char*` returns are JSON envelopes:
 
 ## JSON Wire Protocol (host-call)
 
-Direction: SCI script → Host language.
+Direction: SCI script -> Host language.
 
 ```
 SCI: (host-call "add" 3 4)
-  → Clojure: json/generate-string ["add", 3, 4]
-  → Java: HostDispatcher.dispatch(cString)
-  → Host C function: parse JSON, hashmap lookup, execute
-  → Returns: {"status":"ok","value":7}
-  → Clojure: json/parse-string, return :value
+  -> Clojure: json/generate-string ["add", 3, 4]
+  -> Java: HostDispatcher.dispatch(cString)
+  -> Host C function: parse JSON, hashmap lookup, execute
+  -> Returns: {"status":"ok","value":7}
+  -> Clojure: json/parse-string, return :value
 ```
 
 ### Single round-trip cost breakdown
@@ -79,7 +79,7 @@ SCI: (host-call "add" 3 4)
 | json/parse-string (small) | ~500-2000ns |
 | SCI eval-string* (single call) | ~5000-50000ns |
 
-Total ~1-5μs per host-call for typical payloads. JSON serialization is the
+Total ~1-5us per host-call for typical payloads. JSON serialization is the
 dominant cost; acceptable for most use cases where script logic dominates FFI
 call frequency.
 
@@ -130,20 +130,20 @@ public static void setHostDispatcher(long isolateId, long fnPtr) {
 
 The `@CFunction` annotation lets GraalVM generate the calling trampoline at
 **build time**. `(HostDispatcher) WordFactory.pointer(ptr)` is a Word type cast,
-not a proxy — it requires no runtime code generation. This is the same Word type
+not a proxy -- it requires no runtime code generation. This is the same Word type
 system used in the existing working code (`CCharPointer value = holder.get()`).
 
 ## C String Lifetime Contract
 
 This is critical for correctness across the FFI boundary.
 
-### Input (host → libsci)
+### Input (host -> libsci)
 
 `CTypeConversion.toJavaString(s)` copies the C string content into a Java String
 at the entry point. The original C string can be freed immediately after the
 @CEntryPoint returns.
 
-### Output (libsci → host)
+### Output (libsci -> host)
 
 `CTypeConversion.toCString(result)` allocates off-heap native memory managed by
 GraalVM. The returned `CCharPointer` points to this memory. The native memory is
@@ -152,7 +152,7 @@ freed when the `CCharPointerHolder` is garbage collected (via finalizer).
 In practice GC only runs during Java code execution (inside `@CEntryPoint`
 calls), so the pointer remains valid from when the `@CEntryPoint` returns until
 the NEXT `@CEntryPoint` call triggers GC. This gives the host a safe window of
-at least one full "host code → libsci call → return" cycle.
+at least one full "host code -> libsci call -> return" cycle.
 
 **But relying on this window is fragile.** The host should copy the string
 content into its own memory immediately after every `@CEntryPoint` call. See
@@ -182,38 +182,38 @@ after every `@CEntryPoint` call. This eliminates any lifecycle coupling
 between Java's GC timing and the host's string usage:
 
 ```
-@CEntryPoint return → host reads CCharPointer → host copies to own string → host uses string
+@CEntryPoint return -> host reads CCharPointer -> host copies to own string -> host uses string
 
 The copy creates an independent string that:
-  ✅ Lives as long as the host needs it
-  ✅ Doesn't depend on isolate's GC timing
-  ✅ Can be safely passed across threads in the host
-  ✅ Lets libsci's native memory be reused/GC'd freely
+  [OK] Lives as long as the host needs it
+  [OK] Doesn't depend on isolate's GC timing
+  [OK] Can be safely passed across threads in the host
+  [OK] Lets libsci's native memory be reused/GC'd freely
 ```
 
 Copy overhead (100-500ns for typical <1KB strings) is negligible compared to
 SCI eval time (several microseconds to milliseconds).
 
-#### Example: Zig — immediate copy via allocator
+#### Example: Zig -- immediate copy via allocator
 
 ```zig
 pub fn callFunction(thread: anytype, allocator: std.mem.Allocator, name: []const u8, args: []const u8) ![]const u8 {
     const raw = c.call_function(thread, name.ptr, args.ptr);
-    // ⬇ 立即复制到自己的内存
+    // immediately copy to own memory
     return try allocator.dupe(u8, std.mem.span(raw));
 }
 ```
 
-#### Example: C — immediate copy via strdup
+#### Example: C -- immediate copy via strdup
 
 ```c
 const char* raw = eval_in_context(thread, "(+ 1 2)");
-char* result = strdup(raw);      // 立即复制
-// ... 使用 result，不再依赖原始指针 ...
-free(result);                     // 主机自己控制生命周期
+char* result = strdup(raw);      // immediately copy
+// ... use result, no longer depends on raw pointer ...
+free(result);                     // host controls lifecycle
 ```
 
-#### Example: Go — GoString copies automatically
+#### Example: Go -- GoString copies automatically
 
 ```go
 // GoString already performs an internal copy
@@ -221,7 +221,7 @@ result := C.GoString(C.eval_in_context(thread, expr))
 // result is an independent Go string with no lifecycle coupling
 ```
 
-#### Example: Rust — immediate copy
+#### Example: Rust -- immediate copy
 
 ```rust
 let raw = eval_in_context(thread, cstr_ptr);
@@ -229,7 +229,7 @@ let result = unsafe { CStr::from_ptr(raw).to_str()?.to_string() };
 // result is an owned Rust String, no raw pointer coupling
 ```
 
-#### Example: Python — ctypes returns copied bytes
+#### Example: Python -- ctypes returns copied bytes
 
 ```python
 lib.eval_in_context.restype = ctypes.c_char_p
@@ -238,7 +238,7 @@ raw = lib.eval_in_context(thread, ctypes.c_char_p(b"(+ 1 2)"))
 result = raw.decode("utf-8")
 ```
 
-#### Example: Swift — String(cString:) copies
+#### Example: Swift -- String(cString:) copies
 
 ```swift
 let raw = eval_in_context(thread, expr)
@@ -260,7 +260,7 @@ The current native-image build uses default single-threaded isolate mode
 - Only one thread can call into the isolate at a time
 - The host **must serialize** all @CEntryPoint calls with a mutex
 - `host-call` dispatcher callbacks run on the same thread as the calling
-  @CEntryPoint — the dispatcher's result buffer has no concurrent access
+  @CEntryPoint -- the dispatcher's result buffer has no concurrent access
 
 ### Per-thread context model
 
@@ -268,7 +268,7 @@ Each thread independently calls `load_script` to create its own SCI context.
 The Clojure bridge uses a per-thread atom map instead of a single global atom:
 
 ```clojure
-(defonce contexts (atom {}))  ;; {thread-id → ctx}
+(defonce contexts (atom {}))  ;; {thread-id -> ctx}
 
 (defn- get-ctx []
   (get @contexts (.getId (Thread/currentThread))))
@@ -297,7 +297,7 @@ The Clojure bridge uses a per-thread atom map instead of a single global atom:
           {:status "error" :error (str (type e)) :message (.getMessage e)})))))
 ```
 
-Wait — this still calls `merge-opts` every time. Better: use a flag to track
+Wait -- this still calls `merge-opts` every time. Better: use a flag to track
 whether init has happened, and avoid merging empty opts:
 
 ```clojure
@@ -319,17 +319,17 @@ whether init has happened, and avoid merging empty opts:
           {:status "error" :error (str (type e)) :message (.getMessage e)})))))
 ```
 
-First call on each thread → init → subsequent calls on same thread reuse.
+First call on each thread -> init -> subsequent calls on same thread reuse.
 
 ### Thread safety summary
 
 | Component | Mechanism | Safety |
 |---|---|---|
-| `dispatcher` field | `volatile`, write-once | ✅ All threads see same value |
-| `contexts` atom | CAS swap per-thread key | ✅ Per-thread key prevents races |
-| `CCharPointerHolder` | Stack-local | ✅ Thread-isolated |
-| Host dispatcher buffer | Synchronous callback on calling thread | ✅ No concurrent access |
-| SCI eval state | Isolated per-thread context | ✅ No shared SCI state
+| `dispatcher` field | `volatile`, write-once | [OK] All threads see same value |
+| `contexts` atom | CAS swap per-thread key | [OK] Per-thread key prevents races |
+| `CCharPointerHolder` | Stack-local | [OK] Thread-isolated |
+| Host dispatcher buffer | Synchronous callback on calling thread | [OK] No concurrent access |
+| SCI eval state | Isolated per-thread context | [OK] No shared SCI state
 
 ## Clojure Bridge Implementation Notes
 
@@ -356,7 +356,7 @@ is achieved by having each thread independently call `load_script`.
 ### Per-thread context model
 
 ```clojure
-(defonce contexts (atom {}))  ;; {thread-id → ctx}
+(defonce contexts (atom {}))  ;; {thread-id -> ctx}
 
 (defn- get-ctx []
   (get @contexts (.getId (Thread/currentThread))))
@@ -389,17 +389,17 @@ is achieved by having each thread independently call `load_script`.
   (swap! contexts dissoc (.getId (Thread/currentThread))))
 ```
 
-First call on each thread → `sci/init` → subsequent calls reuse. No unnecessary
+First call on each thread -> `sci/init` -> subsequent calls reuse. No unnecessary
 `merge-opts {}` on every call.
 
 ### fixed: JSON parse error returns structured envelope
 
 ```clojure
-;; BAD — returns raw string on parse failure:
+;; BAD -- returns raw string on parse failure:
 (try (json/parse-string raw-result true)
      (catch Exception _ raw-result))
 
-;; GOOD — structured error that SCI scripts can handle:
+;; GOOD -- structured error that SCI scripts can handle:
 (try (json/parse-string raw-result true)
      (catch Exception e
        {:status "error"
@@ -430,14 +430,14 @@ The closure captures no mutable external state, so `defonce` is safe.
 ### Performance note: batch host calls
 
 Avoid calling `(host-call ...)` in tight SCI loops. Each call incurs JSON
-serialization overhead (~2-4μs). For bulk operations, define batch functions:
+serialization overhead (~2-4us). For bulk operations, define batch functions:
 
 ```clojure
-;; BAD — 10,000 individual host-calls:
+;; BAD -- 10,000 individual host-calls:
 (doseq [i (range 10000)]
   (host-call "process" i))
 
-;; GOOD — one call with a vector argument:
+;; GOOD -- one call with a vector argument:
 (host-call "process-batch" (vec (range 10000)))
 ```
 
@@ -446,14 +446,14 @@ The host-side batch handler iterates and returns aggregated results.
 ## Files
 
 ### New
-- `libsci/src/sci/impl/LibSciHost.java` — @CEntryPoints + HostDispatcher
-- `libsci/src/sci/impl/libsci_host.clj` — Clojure bridge
-- `tests/` — test directory
-- `docs/superpowers/specs/` — this document
+- `libsci/src/sci/impl/LibSciHost.java` -- @CEntryPoints + HostDispatcher
+- `libsci/src/sci/impl/libsci_host.clj` -- Clojure bridge
+- `tests/` -- test directory
+- `docs/superpowers/specs/` -- this document
 
 ### Modified
-- `project.clj` — add `sci.impl.libsci-host` to `:aot`
-- `libsci/bb/libsci_tasks.clj` — add `LibSciHost.java` to javac command
+- `project.clj` -- add `sci.impl.libsci-host` to `:aot`
+- `libsci/bb/libsci_tasks.clj` -- add `LibSciHost.java` to javac command
 
 ## Testing
 
@@ -518,7 +518,7 @@ A minimal C program that:
 
 ### Batch host calls when in loops
 
-Each `(host-call ...)` adds ~2-4μs for JSON serialization. For scripts that
+Each `(host-call ...)` adds ~2-4us for JSON serialization. For scripts that
 call host functions in tight loops, define batch handlers:
 
 ```clojure
@@ -532,7 +532,7 @@ call host functions in tight loops, define batch handlers:
 
 ### String copy overhead
 
-The recommended "immediate copy" pattern (see §C String Lifetime Contract) adds
+The recommended "immediate copy" pattern (see SC String Lifetime Contract) adds
 ~100-500ns per call for typical <1KB strings. Relative to SCI eval time
 (microseconds to milliseconds), this is negligible.
 
@@ -544,16 +544,16 @@ The recommended "immediate copy" pattern (see §C String Lifetime Contract) adds
   correctly solves the no-rebuild requirement.
 - **CFunctionPointer**: Direct cast replaces `toProxy()`, avoiding runtime code
   generation. Requires native-image build verification.
-- **Perf**: ~1-5μs per host-call, JSON serialization is the dominant cost.
+- **Perf**: ~1-5us per host-call, JSON serialization is the dominant cost.
 - **Multi-threading**: volatile dispatcher + per-thread context map + thread-ID-keyed
   atom provide correct isolation.
 
-### Second review (2026-05-23) — critical fix
+### Second review (2026-05-23) -- critical fix
 
 - **Removed `fork_context`**: Original design replaced global ctx on fork,
   breaking multi-thread isolation. Replaced with per-thread `load_script` model:
   each thread independently initializes its own context via the `contexts` map
-  keyed by thread ID. No need for explicit fork — isolation is automatic.
+  keyed by thread ID. No need for explicit fork -- isolation is automatic.
 - **Isolate constraint documented**: Single-threaded isolate requires host
   serialization of @CEntryPoint calls via mutex; host-call dispatcher runs on
   calling thread (no concurrent buffer access).
@@ -569,4 +569,4 @@ The recommended "immediate copy" pattern (see §C String Lifetime Contract) adds
 2. **@CEntryPoint parameter**: Passes dispatcher on every call instead of
    storing it; API verbosity not justified by benefits.
 3. **`fork_context` with shared global ctx**: Replaces global on fork, breaking
-   multi-thread isolation — replaced by per-thread load_script model.
+   multi-thread isolation -- replaced by per-thread load_script model.

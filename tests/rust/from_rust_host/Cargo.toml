@@ -1,0 +1,10 @@
+[package]
+name = "from_rust_host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+bindgen = "0.71"

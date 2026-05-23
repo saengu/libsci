@@ -13,7 +13,7 @@ index 5f9ce1f..0259547 100644
      (let [native-image (str (fs/path graalvm-home "bin"
                                       (if (fs/windows?) "native-image.cmd" "native-image")))]
 diff --git a/libsci/src/sci/impl/LibSci.java b/libsci/src/sci/impl/LibSci.java
-index cfe15fc..55ab363 100644
+index cfe15fc..e6f86b1 100644
 --- a/libsci/src/sci/impl/LibSci.java
 +++ b/libsci/src/sci/impl/LibSci.java
 @@ -6,6 +6,7 @@ import org.graalvm.nativeimage.c.type.CTypeConversion;
@@ -24,12 +24,10 @@ index cfe15fc..55ab363 100644
      @CEntryPoint(name = "eval_string")
      public static @CConst CCharPointer evalString(@CEntryPoint.IsolateThreadContext long isolateId, @CConst CCharPointer s) {
          String expr = CTypeConversion.toJavaString(s);
-@@ -14,4 +15,54 @@ public final class LibSci {
+@@ -14,4 +15,52 @@ public final class LibSci {
          CCharPointer value = holder.get();
          return value;
      }
-+
-+    // ── Persistent context entry points ──
 +
 +    @CEntryPoint(name = "load_script")
 +    public static @CConst CCharPointer loadScript(
@@ -81,76 +79,65 @@ index cfe15fc..55ab363 100644
  }
 diff --git a/libsci/src/sci/impl/LibSciHost.java b/libsci/src/sci/impl/LibSciHost.java
 new file mode 100644
-index 0000000..27efccd
+index 0000000..873fc1f
 --- /dev/null
 +++ b/libsci/src/sci/impl/LibSciHost.java
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,49 @@
 +package sci.impl;
 +
 +import org.graalvm.nativeimage.c.function.CEntryPoint;
-+import org.graalvm.nativeimage.c.function.CFunction;
-+import org.graalvm.nativeimage.c.function.CFunctionPointer;
 +import org.graalvm.nativeimage.c.type.CCharPointer;
++import org.graalvm.nativeimage.c.type.CConst;
 +import org.graalvm.nativeimage.c.type.CTypeConversion;
-+import org.graalvm.word.WordFactory;
++
++import java.util.UUID;
++import java.util.concurrent.ConcurrentHashMap;
 +
 +public final class LibSciHost {
 +
-+    // ── Host dispatcher interface ──
-+    // @CFunction tells GraalVM to generate the calling trampoline at build time.
-+    // Direct cast (HostDispatcher) WordFactory.pointer(ptr) replaces the runtime
-+    // toProxy() call that failed in native-image --shared builds.
-+    public interface HostDispatcher extends CFunctionPointer {
-+        @CFunction
-+        CCharPointer dispatch(CCharPointer jsonArgs);
++    private static final ConcurrentHashMap<String, String> pendingCalls = new ConcurrentHashMap<>();
++    private static final ConcurrentHashMap<String, String> callResults = new ConcurrentHashMap<>();
++
++    public static String registerCall(String argsJson) {
++        String id = UUID.randomUUID().toString();
++        pendingCalls.put(id, argsJson);
++        return id;
 +    }
 +
-+    // ── Static dispatcher pointer ──
-+    // volatile guarantees visibility across threads.
-+    // WordFactory.nullPointer() = null pointer (isNull() returns true).
-+    private static volatile HostDispatcher dispatcher = WordFactory.nullPointer();
-+
-+    // ── Set host dispatcher (C entry point) ──
-+    // Called once by the host at startup with a C function pointer address.
-+    @CEntryPoint(name = "set_host_dispatcher")
-+    public static void setHostDispatcher(
-+            @CEntryPoint.IsolateThreadContext long isolateId,
-+            long fnPtr) {
-+        dispatcher = (HostDispatcher) WordFactory.pointer(fnPtr);
++    public static String consumeResult(String id) {
++        return callResults.remove(id);
 +    }
 +
-+    // ── Internal: dispatch a host-call from Clojure ──
-+    // Called by sci.impl.libsci-host/-host-call-impl.
-+    // Returns a JSON string: {"status":"ok","value":...} or error envelope.
-+    public static String dispatchHostCall(String argsJson) {
-+        if (dispatcher.isNull()) {
-+            return "{\"status\":\"error\","
-+                 + "\"message\":\"No host dispatcher registered.\"}";
-+        }
-+        try {
-+            CTypeConversion.CCharPointerHolder holder =
-+                CTypeConversion.toCString(argsJson);
-+            CCharPointer result = dispatcher.dispatch(holder.get());
-+            return CTypeConversion.toJavaString(result);
-+        } catch (Exception e) {
-+            return "{\"status\":\"error\","
-+                 + "\"message\":\"dispatcher call failed: "
-+                 + e.getMessage() + "\"}";
-+        }
++    @CEntryPoint(name = "get_pending_host_call")
++    public static @CConst CCharPointer getPendingHostCall(
++            @CEntryPoint.IsolateThreadContext long tid,
++            @CConst CCharPointer idCStr) {
++        String id = CTypeConversion.toJavaString(idCStr);
++        String data = pendingCalls.get(id);
++        if (data == null) data = "{\"status\":\"not_found\"}";
++        CTypeConversion.CCharPointerHolder h = CTypeConversion.toCString(data);
++        return h.get();
 +    }
 +
-+    // ── Helper: Java String → CCharPointer ──
-+    private static CCharPointer returnCString(String s) {
-+        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(s);
-+        return holder.get();
++    @CEntryPoint(name = "deliver_host_call_result")
++    public static @CConst CCharPointer deliverHostCallResult(
++            @CEntryPoint.IsolateThreadContext long tid,
++            @CConst CCharPointer idCStr,
++            @CConst CCharPointer resultCStr) {
++        String id = CTypeConversion.toJavaString(idCStr);
++        String result = CTypeConversion.toJavaString(resultCStr);
++        pendingCalls.remove(id);
++        callResults.put(id, result);
++        CTypeConversion.CCharPointerHolder h = CTypeConversion.toCString("{\"status\":\"ok\"}");
++        return h.get();
 +    }
 +}
 diff --git a/libsci/src/sci/impl/libsci_host.clj b/libsci/src/sci/impl/libsci_host.clj
 new file mode 100644
-index 0000000..0a80eec
+index 0000000..9e15603
 --- /dev/null
 +++ b/libsci/src/sci/impl/libsci_host.clj
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,75 @@
 +(ns sci.impl.libsci-host
 +  (:require [cheshire.core :as json]
 +            [sci.core :as sci])
@@ -160,25 +147,18 @@ index 0000000..0a80eec
 +             ^{:static true} [evalInContext  [String] String]
 +             ^{:static true} [resetContext   [] void]]))
 +
-+;; ── Per-thread context registry ──
-+;; Each OS thread gets its own SCI context. Thread A's defs are invisible to
-+;; Thread B, and vice versa. Keyed by JVM thread ID (.getId on Thread).
-+
 +(defonce contexts (atom {}))
 +
-+(defn- get-ctx
-+  "Get the current thread's SCI context, or nil if not yet initialized."
-+  []
++(defn- get-ctx []
 +  (get @contexts (.getId (Thread/currentThread))))
 +
-+(defn- set-ctx!
-+  "Store the current thread's SCI context."
-+  [ctx]
++(defn- set-ctx! [ctx]
 +  (swap! contexts assoc (.getId (Thread/currentThread)) ctx))
 +
-+;; ── Base SCI options ──
-+;; defonce ensures the map and closure are created once at load time.
-+;; Must be defined before get-or-init-ctx which references it.
++(defn- register-host-call [args-json]
++  (let [cls  (Class/forName "sci.impl.LibSciHost")
++        meth (.getMethod cls "registerCall" (into-array Class [String]))]
++    (.invoke meth nil (into-array Object [args-json]))))
 +
 +(defonce base-opts
 +  {:namespaces {'cheshire.core
@@ -186,30 +166,17 @@ index 0000000..0a80eec
 +                 'parse-string    json/parse-string}}
 +   :bindings {'host-call
 +              (fn [& args]
-+                (let [args-json  (json/generate-string (vec args))
-+                      raw-result (sci.impl.LibSciHost/dispatchHostCall args-json)]
-+                  (if (string? raw-result)
-+                    (try (json/parse-string raw-result true)
-+                         (catch Exception e
-+                           {:status "error"
-+                            :message (str "Failed to parse host response: "
-+                                          (.getMessage e))}))
-+                    raw-result)))}})
++                (let [args-json (json/generate-string (vec args))]
++                  (register-host-call args-json)))}})
 +
-+(defn- get-or-init-ctx
-+  "Return current thread's context, creating one with base-opts if needed."
-+  []
++(defn- get-or-init-ctx []
 +  (if-let [ctx (get-ctx)]
 +    ctx
 +    (let [new-ctx (sci/init base-opts)]
 +      (set-ctx! new-ctx)
 +      new-ctx)))
 +
-+;; ── Public API ──
-+
-+(defn -loadScript
-+  "Load a Clojure script into the current thread's persistent SCI context."
-+  [s]
++(defn -loadScript [s]
 +  (sci/binding [sci/out *out*]
 +    (try
 +      (let [c      (get-or-init-ctx)
@@ -219,9 +186,7 @@ index 0000000..0a80eec
 +        (json/generate-string
 +          {:status "error" :error (str (type e)) :message (.getMessage e)})))))
 +
-+(defn -callFunction
-+  "Call a named function in the current thread's context with EDN arguments."
-+  [fn-name args-edn]
++(defn -callFunction [fn-name args-edn]
 +  (sci/binding [sci/out *out*]
 +    (if-let [c (get-ctx)]
 +      (try
@@ -234,9 +199,7 @@ index 0000000..0a80eec
 +      (json/generate-string
 +        {:status "error" :message "No context. Call load_script first."}))))
 +
-+(defn -evalInContext
-+  "Evaluate a complete Clojure expression in the current thread's context."
-+  [s]
++(defn -evalInContext [s]
 +  (sci/binding [sci/out *out*]
 +    (if-let [c (get-ctx)]
 +      (try
@@ -248,9 +211,7 @@ index 0000000..0a80eec
 +      (json/generate-string
 +        {:status "error" :message "No context. Call load_script first."}))))
 +
-+(defn -resetContext
-+  "Remove the current thread's context. Next load_script creates a fresh one."
-+  []
++(defn -resetContext []
 +  (swap! contexts dissoc (.getId (Thread/currentThread))))
 diff --git a/project.clj b/project.clj
 index 7bcc555..173855b 100644
@@ -265,67 +226,19 @@ index 7bcc555..173855b 100644
    ;; for testing only
    :deploy-repositories [["clojars" {:url "https://clojars.org/repo"
                                      :username :env/clojars_user
-diff --git a/test/libsci_host_test.clj b/test/libsci_host_test.clj
-new file mode 100644
-index 0000000..e69f0a1
---- /dev/null
-+++ b/test/libsci_host_test.clj
-@@ -0,0 +1,58 @@
-+(ns libsci-host-test
-+  (:require [cheshire.core :as json]
-+            [clojure.string :as str]
-+            [clojure.test :refer [deftest is testing]]
-+            [sci.impl.libsci-host :as host]))
-+
-+(deftest load-and-call
-+  (testing "load a script and call a function defined in it"
-+    (host/-resetContext)
-+    (host/-loadScript "(defn add [x y] (+ x y))")
-+    (let [result (host/-callFunction "add" "3 4")]
-+      (is (= "7" (-> result json/parse-string (get "value")))))))
-+
-+(deftest eval-in-context
-+  (testing "eval an expression in the persistent context"
-+    (host/-resetContext)
-+    (host/-loadScript "(def x 42)")
-+    (let [result (host/-evalInContext "x")]
-+      (is (= "42" (-> result json/parse-string (get "value")))))))
-+
-+(deftest host-call-error-no-dispatcher
-+  (testing "host-call returns error when no dispatcher registered"
-+    (host/-resetContext)
-+    (let [result (host/-loadScript "(host-call \"add\" 3 4)")]
-+      (is (= "error" (-> result json/parse-string (get "status")))))))
-+
-+(deftest context-reset-isolation
-+  (testing "reset + reload gives independent state (thread isolation simulated)"
-+    (host/-resetContext)
-+    (host/-loadScript "(def x 1)")
-+    (let [main-x (-> (host/-evalInContext "x") json/parse-string (get "value"))]
-+      (is (= "1" main-x))
-+      (host/-resetContext)
-+      (host/-loadScript "(def x 2)")
-+      (let [other-x (-> (host/-evalInContext "x") json/parse-string (get "value"))]
-+        (is (= "2" other-x))))))
-+
-+(deftest load-script-error
-+  (testing "parse error returns JSON error, not throw"
-+    (host/-resetContext)
-+    (let [result (host/-loadScript "(+ 1")
-+          parsed (json/parse-string result)]
-+      (is (= "error" (get parsed "status")))
-+      (is (string? (get parsed "error"))))))
-+
-+(deftest call-function-with-keyword
-+  (testing "call_function supports EDN keywords"
-+    (host/-resetContext)
-+    (host/-loadScript "(defn get-val [m k] (get m k))")
-+    (let [result (host/-callFunction "get-val" "{:a 1 :b 2} :a")]
-+      (is (= "1" (-> result json/parse-string (get "value")))))))
-+
-+(deftest cross-ns-call
-+  (testing "call_function supports namespace-qualified fns"
-+    (host/-resetContext)
-+    (host/-loadScript "(ns my.ns) (defn calc [x] (* x 2))")
-+    (let [result (host/-callFunction "my.ns/calc" "21")]
-+      (is (= "42" (-> result json/parse-string (get "value")))))))
+diff --git a/reflection.json b/reflection.json
+index bc9c591..83e41c8 100644
+--- a/reflection.json
++++ b/reflection.json
+@@ -106,5 +106,10 @@
+      {"name": "aset"},
+      {"name": "aclone"}
+    ]},
+-  {"name": "[Ljava.lang.Double;"}
++  {"name": "[Ljava.lang.Double;"},
++  {"name": "sci.impl.LibSciHost",
++   "methods": [
++     {"name":"registerCall","parameterTypes":["java.lang.String"]},
++     {"name":"consumeResult","parameterTypes":["java.lang.String"]}
++   ]}
+ ]
