@@ -1,5 +1,5 @@
 diff --git a/libsci/bb/libsci_tasks.clj b/libsci/bb/libsci_tasks.clj
-index 5f9ce1f..cc2bb84 100644
+index 5f9ce1f..0259547 100644
 --- a/libsci/bb/libsci_tasks.clj
 +++ b/libsci/bb/libsci_tasks.clj
 @@ -43,7 +43,8 @@
@@ -8,73 +8,83 @@ index 5f9ce1f..cc2bb84 100644
                 "-cp" (str/join fs/path-separator [sci-jar svm-jar])
 -               "libsci/src/sci/impl/LibSci.java"))
 +               "libsci/src/sci/impl/LibSci.java"
-+               "libsci/src/sci/impl/LibSciContext.java"))
++               "libsci/src/sci/impl/LibSciHost.java"))
  
      (let [native-image (str (fs/path graalvm-home "bin"
                                       (if (fs/windows?) "native-image.cmd" "native-image")))]
-diff --git a/libsci/src/sci/impl/LibSciContext.java b/libsci/src/sci/impl/LibSciContext.java
-new file mode 100644
-index 0000000..084ef6a
---- /dev/null
-+++ b/libsci/src/sci/impl/LibSciContext.java
-@@ -0,0 +1,377 @@
-+/*
-+ * LibSciContext.java — Host dispatcher + persistent SCI context API.
-+ *
-+ * ── ROLE ─────────────────────────────────────────────────────────
-+ *
-+ * This file contains everything added beyond the original eval_string
-+ * entry point (which lives in LibSci.java).  It is a separate class
-+ * so LibSci.java stays minimal, matching the prebuilt release.
-+ *
-+ * Two concerns live here because they share the host dispatcher:
-+ *
-+ *   1. HOST DISPATCHER — a single C function pointer that SCI scripts
-+ *      call via (host-call "fn-name" args...).  Dispatch-by-name
-+ *      happens in the host language; Java stores exactly ONE pointer.
-+ *
-+ *   2. PERSISTENT CONTEXT — load_script / call_function /
-+ *      eval_in_context / reset_context @CEntryPoints that maintain a
-+ *      long-lived SCI context so defs, atoms, and namespace state
-+ *      survive across calls.
-+ *
-+ * ── WHY A SINGLE DISPATCHER? ─────────────────────────────────────
-+ *
-+ * Alternative: Java holds a HashMap<String, Long> of function
-+ * pointers with separate @CEntryPoints per C signature.  Problems:
-+ *   - Java must classify and switch on function kind per call
-+ *   - WordFactory.toProxy() runs on every invocation (extra work)
-+ *   - Multiple @CEntryPoints bloat the generated C header
-+ *   - Adding a new host function requires a new Java @CEntryPoint
-+ *
-+ * Single-dispatcher design: host registers ONE pointer.  Java stores
-+ * ONE field.  Name-based dispatch moves to the host where it's a
-+ * simple hashmap lookup.  Adding a host function is one line in the
-+ * host language, zero lines in Java.
-+ *
-+ * ── CALL FLOW ────────────────────────────────────────────────────
-+ *
-+ * SCI:  (host-call "host-add" 3 4)
-+ *   │
-+ *   ▼
-+ * Clojure bridge: json-encode → "[\"host-add\",3,4]"
-+ *   │
-+ *   ▼
-+ * dispatchHostCall(argsJson):
-+ *   1. Check dispatcher registered (return JSON error if not)
-+ *   2. Java String → C string (null-terminated char*)
-+ *   3. Call through function pointer → host language
-+ *   4. C string result → Java String (read immediately — host
-+ *      buffer may be overwritten by next call)
-+ *   5. Return to Clojure
-+ *   │
-+ *   ▼
-+ * Host: extract "host-add" from JSON[0], lookup handler, call it
-+ *   │
-+ *   ▼
-+ * SCI:  ← 7  (parsed from JSON response)
-+ */
+diff --git a/libsci/src/sci/impl/LibSci.java b/libsci/src/sci/impl/LibSci.java
+index cfe15fc..55ab363 100644
+--- a/libsci/src/sci/impl/LibSci.java
++++ b/libsci/src/sci/impl/LibSci.java
+@@ -6,6 +6,7 @@ import org.graalvm.nativeimage.c.type.CTypeConversion;
+ import org.graalvm.nativeimage.c.type.CConst;
+ 
+ public final class LibSci {
 +
+     @CEntryPoint(name = "eval_string")
+     public static @CConst CCharPointer evalString(@CEntryPoint.IsolateThreadContext long isolateId, @CConst CCharPointer s) {
+         String expr = CTypeConversion.toJavaString(s);
+@@ -14,4 +15,54 @@ public final class LibSci {
+         CCharPointer value = holder.get();
+         return value;
+     }
++
++    // ── Persistent context entry points ──
++
++    @CEntryPoint(name = "load_script")
++    public static @CConst CCharPointer loadScript(
++            @CEntryPoint.IsolateThreadContext long id,
++            @CConst CCharPointer s) {
++        String script = CTypeConversion.toJavaString(s);
++        String result = sci.impl.libsci_host.loadScript(script);
++        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
++        return holder.get();
++    }
++
++    @CEntryPoint(name = "call_function")
++    public static @CConst CCharPointer callFunction(
++            @CEntryPoint.IsolateThreadContext long id,
++            @CConst CCharPointer fnName,
++            @CConst CCharPointer argsEdn) {
++        String name = CTypeConversion.toJavaString(fnName);
++        String args = CTypeConversion.toJavaString(argsEdn);
++        String result = sci.impl.libsci_host.callFunction(name, args);
++        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
++        return holder.get();
++    }
++
++    @CEntryPoint(name = "eval_in_context")
++    public static @CConst CCharPointer evalInContext(
++            @CEntryPoint.IsolateThreadContext long id,
++            @CConst CCharPointer s) {
++        String expr = CTypeConversion.toJavaString(s);
++        String result = sci.impl.libsci_host.evalInContext(expr);
++        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
++        return holder.get();
++    }
++
++    @CEntryPoint(name = "reset_context")
++    public static void resetContext(
++            @CEntryPoint.IsolateThreadContext long id) {
++        sci.impl.libsci_host.resetContext();
++    }
++
++    @CEntryPoint(name = "eval")
++    public static @CConst CCharPointer eval(
++            @CEntryPoint.IsolateThreadContext long id,
++            @CConst CCharPointer s) {
++        String expr = CTypeConversion.toJavaString(s);
++        String result = sci.impl.libsci.evalString(expr);
++        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
++        return holder.get();
++    }
+ }
+diff --git a/libsci/src/sci/impl/LibSciHost.java b/libsci/src/sci/impl/LibSciHost.java
+new file mode 100644
+index 0000000..27efccd
+--- /dev/null
++++ b/libsci/src/sci/impl/LibSciHost.java
+@@ -0,0 +1,60 @@
 +package sci.impl;
 +
 +import org.graalvm.nativeimage.c.function.CEntryPoint;
@@ -82,753 +92,240 @@ index 0000000..084ef6a
 +import org.graalvm.nativeimage.c.function.CFunctionPointer;
 +import org.graalvm.nativeimage.c.type.CCharPointer;
 +import org.graalvm.nativeimage.c.type.CTypeConversion;
-+import org.graalvm.nativeimage.c.type.CConst;
 +import org.graalvm.word.WordFactory;
 +
-+public final class LibSciContext {
++public final class LibSciHost {
 +
-+    // ==================================================================
-+    //  SECTION 1: HOST DISPATCHER
-+    // ==================================================================
-+
-+    /**
-+     * The C function signature every host-side handler must match:
-+     *
-+     *   const char* handler(const char* json_args);
-+     *
-+     * json_args is a JSON array string where element [0] is the
-+     * function name and elements [1..N] are the SCI arguments.
-+     *
-+     * Example: SCI script calls (host-call "fetch" 42 "Alice")
-+     *   → json_args = "[\"fetch\",42,\"Alice\"]"
-+     *
-+     * Return value is a JSON object string:
-+     *   {"status":"ok","value":<result>}
-+     *   {"status":"error","message":"<details>"}
-+     *
-+     * @CFunction tells GraalVM: "generate trampoline code that bridges
-+     * the C calling convention to this Java interface method."  When
-+     * you call .invoke(jsonArgs) on a proxy backed by a C pointer,
-+     * GraalVM pushes the CCharPointer onto the C stack, jumps to the
-+     * function address, and reads the returned CCharPointer from the
-+     * C return register.
-+     */
++    // ── Host dispatcher interface ──
++    // @CFunction tells GraalVM to generate the calling trampoline at build time.
++    // Direct cast (HostDispatcher) WordFactory.pointer(ptr) replaces the runtime
++    // toProxy() call that failed in native-image --shared builds.
 +    public interface HostDispatcher extends CFunctionPointer {
 +        @CFunction
-+        CCharPointer invoke(CCharPointer jsonArgs);
++        CCharPointer dispatch(CCharPointer jsonArgs);
 +    }
 +
-+    /**
-+     * The SINGLE host dispatcher pointer.
-+     *
-+     * null means "host hasn't registered yet."  Set once at startup
-+     * via set_host_dispatcher, then called on every (host-call ...)
-+     * in SCI scripts.
-+     *
-+     * volatile ensures the write in set_host_dispatcher is visible to
-+     * the read in dispatchHostCall even across isolate threads
-+     * (relevant for multi-threaded isolates; harmless otherwise).
-+     */
-+    private static volatile HostDispatcher dispatcher = null;
++    // ── Static dispatcher pointer ──
++    // volatile guarantees visibility across threads.
++    // WordFactory.nullPointer() = null pointer (isNull() returns true).
++    private static volatile HostDispatcher dispatcher = WordFactory.nullPointer();
 +
-+    /**
-+     * C Entry Point: set_host_dispatcher
-+     *
-+     * Called ONCE by the host language at startup, before loading any
-+     * SCI scripts.  The host passes a raw C function pointer as a
-+     * 64-bit integer:
-+     *
-+     *   Zig:  @intFromPtr(&host_dispatcher)
-+     *   C:    (int64_t)(uintptr_t)&host_dispatcher
-+     *   Rust: host_dispatcher as u64
-+     *
-+     * WordFactory.pointer(fnPtr) interprets the long as a memory
-+     * address.  .toProxy(HostDispatcher.class) creates a Java object
-+     * where calling .invoke() does a native call through that address.
-+     * This is zero-overhead — the JIT compiles it to a direct call.
-+     *
-+     * @CEntryPoint — generates C function set_host_dispatcher(int64_t)
-+     * in the shared library header.
-+     *
-+     * @CEntryPoint.IsolateThreadContext long isolateId — GraalVM passes
-+     * the current isolate thread handle.  We don't use it here (the
-+     * function pointer is process-wide), but the annotation contract
-+     * requires it.
-+     */
++    // ── Set host dispatcher (C entry point) ──
++    // Called once by the host at startup with a C function pointer address.
 +    @CEntryPoint(name = "set_host_dispatcher")
 +    public static void setHostDispatcher(
 +            @CEntryPoint.IsolateThreadContext long isolateId,
 +            long fnPtr) {
-+        dispatcher = WordFactory.pointer(fnPtr)
-+            .toProxy(HostDispatcher.class);
++        dispatcher = (HostDispatcher) WordFactory.pointer(fnPtr);
 +    }
 +
-+    /**
-+     * Called from the Clojure bridge whenever a SCI script evaluates
-+     * (host-call "fn-name" args...).
-+     *
-+     * This is a plain Java static method — NOT a @CEntryPoint.  It's
-+     * called by sci.impl.libsci_context (Clojure), not directly from C.
-+     *
-+     * Full call cycle (step by step):
-+     *
-+     *   1. argsJson arrives as a Java String:
-+     *      "[\"fetch\",42,\"Alice\"]"
-+     *
-+     *   2. Check dispatcher != null.
-+     *      If null, the host forgot to call set_host_dispatcher before
-+     *      loading a script that uses host-call.  Return a JSON error
-+     *      string instead of segfaulting on a null pointer call.
-+     *
-+     *   3. Java String → C string (null-terminated char*).
-+     *      CTypeConversion.toCString() allocates a null-terminated copy
-+     *      of the Java string in off-heap memory managed by the GraalVM
-+     *      native image heap.  The CCharPointerHolder pins this memory;
-+     *      .get() returns the raw CCharPointer.
-+     *      This allocation lives until garbage-collected or the isolate
-+     *      is torn down.  The host callback reads it and returns before
-+     *      we lose the reference, so it's safe.
-+     *
-+     *   4. dispatcher.invoke(cString) — jump through the function
-+     *      pointer into the host language.
-+     *      - Push the CCharPointer onto the C calling stack
-+     *      - Call the address stored in dispatcher
-+     *      - Host function runs to completion (can do I/O, network,
-+     *        compute — anything)
-+     *      - Read the returned CCharPointer from the C return register
-+     *      JAVA IS BLOCKED during this call.  It's synchronous FFI.
-+     *
-+     *   5. C string → Java String.
-+     *      The returned pointer addresses memory owned by the host
-+     *      (typically a threadlocal char[] buffer).  CTypeConversion
-+     *      reads the null-terminated string and copies it into a Java
-+     *      String on the managed heap.
-+     *      MUST be done IMMEDIATELY — the next host-call will overwrite
-+     *      the host's result buffer.
-+     *
-+     *   6. Return the Java String to Clojure, which parses it as JSON
-+     *      and passes the parsed value back to the SCI script.
-+     *
-+     * Thread safety: In GraalVM's default single-threaded isolate,
-+     * dispatchHostCall runs synchronously during eval_string /
-+     * call_function.  The host callback runs on the same thread.
-+     * No concurrent access to the dispatcher field or result buffer.
-+     *
-+     * @param argsJson  A JSON array string where [0] is the function
-+     *                  name and [1..N] are the SCI arguments.
-+     * @return          JSON string: {"status":"ok","value":...}
-+     *                  or {"status":"error","message":"..."}
-+     */
++    // ── Internal: dispatch a host-call from Clojure ──
++    // Called by sci.impl.libsci-host/-host-call-impl.
++    // Returns a JSON string: {"status":"ok","value":...} or error envelope.
 +    public static String dispatchHostCall(String argsJson) {
-+        if (dispatcher == null) {
++        if (dispatcher.isNull()) {
 +            return "{\"status\":\"error\","
-+                 + "\"message\":\"No host dispatcher registered. "
-+                 + "Call set_host_dispatcher first.\"}";
++                 + "\"message\":\"No host dispatcher registered.\"}";
 +        }
-+
 +        try {
-+            // Java String → C string
 +            CTypeConversion.CCharPointerHolder holder =
 +                CTypeConversion.toCString(argsJson);
-+
-+            // Jump through function pointer → host language
-+            CCharPointer result = dispatcher.invoke(holder.get());
-+
-+            // C string → Java String (immediately, before buffer is reused)
++            CCharPointer result = dispatcher.dispatch(holder.get());
 +            return CTypeConversion.toJavaString(result);
-+
 +        } catch (Exception e) {
-+            // Catches Java-side exceptions from the proxy call.
-+            // NOTE: native crashes (SIGSEGV from invalid pointer)
-+            // are NOT caught — they terminate the process.
 +            return "{\"status\":\"error\","
-+                 + "\"message\":\"" + e.getMessage() + "\"}";
++                 + "\"message\":\"dispatcher call failed: "
++                 + e.getMessage() + "\"}";
 +        }
 +    }
 +
-+    // ==================================================================
-+    //  SECTION 2: PERSISTENT CONTEXT API
-+    // ==================================================================
-+    //
-+    // These four @CEntryPoints provide a stateful SCI environment.
-+    //
-+    // Lifecycle:
-+    //   set_host_dispatcher(...)   — once at startup (register callbacks)
-+    //   load_script("(def x 1)")  — init context, evaluate code
-+    //   call_function("f", "...") — call a function in that context
-+    //   eval_in_context("(+ x 1)")— ad-hoc expression evaluation
-+    //   reset_context()           — destroy context, start fresh
-+    //
-+    // All responses are JSON objects with a uniform envelope:
-+    //   Success: {"status":"ok","value":"<result-as-string>"}
-+    //   Error:   {"status":"error","error":"<exception-type>",
-+    //                                "message":"<details>"}
-+    //
-+    // The uniform envelope means host code checks :status and branches
-+    // on "ok" vs "error" without knowing which entry point was called.
-+
-+    /**
-+     * Load a Clojure script into the persistent SCI context.
-+     *
-+     * If no context exists yet, creates one via sci.core/init.
-+     * If a context already exists, evaluates the script into the
-+     * existing one — existing defs, atoms, and namespace state are
-+     * preserved.
-+     *
-+     * The script can contain any number of top-level forms: def,
-+     * defn, defmacro, require (for namespaces provided in base opts),
-+     * etc.  All side effects persist in the context for subsequent
-+     * call_function and eval_in_context calls.
-+     *
-+     * @param isolateId  GraalVM isolate thread handle (auto-passed)
-+     * @param s          null-terminated C string with Clojure source
-+     * @return           JSON: {"status":"ok","value":"<last-form>"}
-+     *                   or    {"status":"error","error":"...","message":"..."}
-+     *
-+     * C signature:
-+     *   const char* load_script(int64_t thread, const char* script);
-+     */
-+    @CEntryPoint(name = "load_script")
-+    public static @CConst CCharPointer loadScript(
-+            @CEntryPoint.IsolateThreadContext long isolateId,
-+            @CConst CCharPointer s) {
-+        // C string → Java String
-+        String script = CTypeConversion.toJavaString(s);
-+        // Delegate to Clojure bridge (maintains the persistent context atom)
-+        String result = sci.impl.libsci_context.loadScript(script);
-+        // Java String → C string
-+        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
++    // ── Helper: Java String → CCharPointer ──
++    private static CCharPointer returnCString(String s) {
++        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(s);
 +        return holder.get();
-+    }
-+
-+    /**
-+     * Call a named function in the persistent SCI context with EDN args.
-+     *
-+     * The function name and EDN-encoded arguments are spliced into an
-+     * S-expression: "(" + fnName + " " + argsEdn + ")"
-+     *
-+     * Example:
-+     *   fnName  = "greet"
-+     *   argsEdn = "\"Alice\" 42"
-+     *   → SCI evaluates: (greet "Alice" 42)
-+     *
-+     * argsEdn must be valid EDN: strings double-quoted, numbers bare,
-+     * keywords with colon prefix, etc.
-+     *
-+     * For programmatic argument construction from the host, prefer
-+     * building EDN strings directly.  A future call_function_json
-+     * entry point could accept JSON arrays instead.
-+     *
-+     * @param isolateId  GraalVM isolate thread handle
-+     * @param fnName     null-terminated function name (e.g., "greet")
-+     * @param argsEdn    null-terminated EDN arguments (e.g., "\"Alice\"")
-+     * @return           JSON: {"status":"ok","value":"<result>"}
-+     *
-+     * C signature:
-+     *   const char* call_function(int64_t thread,
-+     *                             const char* fn_name,
-+     *                             const char* args_edn);
-+     */
-+    @CEntryPoint(name = "call_function")
-+    public static @CConst CCharPointer callFunction(
-+            @CEntryPoint.IsolateThreadContext long isolateId,
-+            @CConst CCharPointer fnName,
-+            @CConst CCharPointer argsEdn) {
-+        String name = CTypeConversion.toJavaString(fnName);
-+        String args = CTypeConversion.toJavaString(argsEdn);
-+        String result = sci.impl.libsci_context.callFunction(name, args);
-+        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
-+        return holder.get();
-+    }
-+
-+    /**
-+     * Evaluate an arbitrary Clojure expression in the persistent context.
-+     *
-+     * Unlike call_function (which wraps EDN args into one S-expression),
-+     * this takes a complete, ready-to-evaluate Clojure form string.
-+     *
-+     * Useful for:
-+     *   - Multi-form blocks:   "(def x 1) (println x) (+ x 2)"
-+     *   - Threading macros:    "(->> (range 5) (map inc) (reduce +))"
-+     *   - Inline lambdas:      "((fn [x] (* x x)) 42)"
-+     *   - Referencing atoms:   "@counter"
-+     *   - Inspecting vars:     "(var my-function)"
-+     *
-+     * @param isolateId  GraalVM isolate thread handle
-+     * @param s          null-terminated C string with Clojure expression
-+     * @return           JSON: {"status":"ok","value":"<result>"}
-+     *
-+     * C signature:
-+     *   const char* eval_in_context(int64_t thread, const char* expr);
-+     */
-+    @CEntryPoint(name = "eval_in_context")
-+    public static @CConst CCharPointer evalInContext(
-+            @CEntryPoint.IsolateThreadContext long isolateId,
-+            @CConst CCharPointer s) {
-+        String expr = CTypeConversion.toJavaString(s);
-+        String result = sci.impl.libsci_context.evalInContext(expr);
-+        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
-+        return holder.get();
-+    }
-+
-+    /**
-+     * Destroy the persistent SCI context.
-+     *
-+     * Sets the internal context atom back to nil.  After this call:
-+     *   - All defs, defns, atoms, and namespace state are gone
-+     *   - The next load_script creates a brand-new context
-+     *   - call_function / eval_in_context will return "No context" errors
-+     *     until load_script is called again
-+     *
-+     * Use cases:
-+     *   - Hot reload: reset, then load_script with modified source
-+     *   - State reset: clear accumulated atom state between phases
-+     *   - Free memory: release the context when idle
-+     *
-+     * @param isolateId  GraalVM isolate thread handle
-+     *
-+     * C signature:  void reset_context(int64_t thread);
-+     */
-+    @CEntryPoint(name = "reset_context")
-+    public static void resetContext(
-+            @CEntryPoint.IsolateThreadContext long isolateId) {
-+        sci.impl.libsci_context.resetContext();
 +    }
 +}
-diff --git a/libsci/src/sci/impl/libsci_context.clj b/libsci/src/sci/impl/libsci_context.clj
+diff --git a/libsci/src/sci/impl/libsci_host.clj b/libsci/src/sci/impl/libsci_host.clj
 new file mode 100644
-index 0000000..fc3e30c
+index 0000000..0a80eec
 --- /dev/null
-+++ b/libsci/src/sci/impl/libsci_context.clj
-@@ -0,0 +1,418 @@
-+;; ┌─────────────────────────────────────────────────────────────────┐
-+;; │ libsci_context.clj — Persistent SCI context bridge              │
-+;; ├─────────────────────────────────────────────────────────────────┤
-+;; │                                                                 │
-+;; │ PURPOSE                                                         │
-+;; │ ───────                                                         │
-+;; │ This namespace is the "glue" between LibSci.java (which         │
-+;; │ provides C-callable entry points) and the SCI interpreter       │
-+;; │ (which evaluates Clojure code).                                 │
-+;; │                                                                 │
-+;; │ It maintains a SINGLE persistent SCI context in an atom         │
-+;; │ (`ctx`).  This is the fundamental difference from the           │
-+;; │ original libsci.clj — which creates a fresh context on every    │
-+;; │ eval_string call, making defs/defns/atoms non-persistent.       │
-+;; │                                                                 │
-+;; │ PERSISTENCE MODEL                                               │
-+;; │ ────────────────                                                │
-+;; │ The atom `ctx` starts as `nil`.                                 │
-+;; │                                                                 │
-+;; │   load_script("(def x 1)")                                      │
-+;; │     → If nil, sci/init creates a fresh context                  │
-+;; │     → Stores it in the atom                                     │
-+;; │     → sci/eval-string* evaluates the script into it             │
-+;; │     → x=1 is now in the context                                 │
-+;; │                                                                 │
-+;; │   call_function("+", "x 2")                                     │
-+;; │     → Builds expression: "(+ x 2)"                              │
-+;; │     → sci/eval-string* evaluates it in the SAME context         │
-+;; │     → x is found because the context has it                     │
-+;; │     → Returns 3                                                 │
-+;; │                                                                 │
-+;; │   reset_context()                                               │
-+;; │     → Sets atom back to nil                                     │
-+;; │     → Next load_script starts fresh                             │
-+;; │                                                                 │
-+;; │ HOST-CALL MECHANISM                                             │
-+;; │ ───────────────────                                             │
-+;; │ SCI scripts call (host-call "fn-name" arg1 arg2 ...).           │
-+;; │                                                                 │
-+;; │ The bridge does:                                                │
-+;; │   1. Wraps everything in a vector: ["fn-name" arg1 arg2]        │
-+;; │   2. Serializes to JSON string:    "[\"fn-name\",42,\"hi\"]"    │
-+;; │   3. Calls LibSciContext/dispatchHostCall(json)                  │
-+;; │      → Java calls through the ONE C function pointer            │
-+;; │      → Host dispatcher extracts "fn-name", looks up handler     │
-+;; │      → Handler runs, returns JSON result string                 │
-+;; │   4. Parses returned JSON:          {:status "ok" :value 7}     │
-+;; │   5. SCI sees the parsed value as the return of host-call       │
-+;; │                                                                 │
-+;; │ WHY JSON AS THE WIRE FORMAT?                                    │
-+;; │ ─────────────────────────────                                   │
-+;; │ - Cheshire (JSON lib) is already compiled into the native image │
-+;; │ - JSON has libraries in every language (no EDN parser needed)   │
-+;; │ - JSON is the lingua franca of FFI data interchange             │
-+;; │ - The first array element names the function — no separate      │
-+;; │   "function name" parameter needed across the C boundary        │
-+;; └─────────────────────────────────────────────────────────────────┘
-+
-+(ns sci.impl.libsci-context
-+  (:require
-+   ;; Cheshire: Clojure ↔ JSON.  json/generate-string serializes
-+   ;; Clojure data to a JSON string; json/parse-string does the
-+   ;; reverse.  The second arg `true` keywordizes map keys so
-+   ;; "status" becomes :status for idiomatic Clojure access.
-+   [cheshire.core :as json]
-+   ;; sci.core: the SCI interpreter.  Key functions used:
-+   ;;   init          — create a new context from options
-+   ;;   eval-string*  — evaluate code in an existing context
-+   ;;   merge-opts    — merge additional options into a context
-+   ;;   binding       — establish thread-local dynamic var bindings
-+   [sci.core :as sci])
++++ b/libsci/src/sci/impl/libsci_host.clj
+@@ -0,0 +1,101 @@
++(ns sci.impl.libsci-host
++  (:require [cheshire.core :as json]
++            [sci.core :as sci])
 +  (:gen-class
-+   ;; :gen-class tells the Clojure compiler to emit a Java class
-+   ;; named `sci.impl.libsci_context` with the listed static methods.
-+   ;; LibSci.java imports and calls these methods directly, e.g.:
-+   ;;   sci.impl.libsci_context.loadScript(scriptString)
-+   ;;
-+   ;; :methods syntax:
-+   ;;   [^{:static true} [<method-name> [<param-types>] <return-type>] ...]
-+   ;;
-+   ;; All String return types follow the protocol: return a JSON
-+   ;; object string {"status":"ok","value":...} or
-+   ;; {"status":"error","message":"..."}.
-+   ;; resetContext is void — nothing to return, just side effect.
 +   :methods [^{:static true} [loadScript     [String] String]
 +             ^{:static true} [callFunction   [String String] String]
 +             ^{:static true} [evalInContext  [String] String]
 +             ^{:static true} [resetContext   [] void]]))
 +
-+;; ──────────────────────────────────────────────────────────────────
-+;;  PERSISTENT CONTEXT ATOM
-+;; ──────────────────────────────────────────────────────────────────
-+;;
-+;; An atom is Clojure's thread-safe mutable reference container.
-+;;   @ctx        — dereference: read current value (nil or a context)
-+;;   reset! ctx  — replace the value (used to save a new context)
-+;;
-+;; nil means "no context has been loaded yet."  The first call to
-+;; load_script creates it; reset_context sets it back to nil.
-+;;
-+;; The context itself is an opaque map created by sci.core/init.
-+;; Its internal structure is implementation detail — we treat it
-+;; as an opaque handle and pass it to sci/eval-string*.
++;; ── Per-thread context registry ──
++;; Each OS thread gets its own SCI context. Thread A's defs are invisible to
++;; Thread B, and vice versa. Keyed by JVM thread ID (.getId on Thread).
 +
-+(def ctx (atom nil))
++(defonce contexts (atom {}))
 +
-+;; ──────────────────────────────────────────────────────────────────
-+;;  HOST-CALL BRIDGE
-+;; ──────────────────────────────────────────────────────────────────
-+;;
-+;; These two functions implement the SCI → host call path.
-+
-+(defn- host-call-impl
-+  "The function executed when a SCI script calls (host-call ...).
-+
-+   Parameters: all the arguments passed to host-call.
-+     (host-call \"fetch\" 42 \"Alice\")  → args = (\"fetch\" 42 \"Alice\")
-+
-+   Step-by-step:
-+
-+   1. (vec args) — convert the argument sequence to a vector.
-+      This ensures we get a proper sequential collection regardless
-+      of whether SCI passes a list, lazy seq, or vector.
-+
-+   2. json/generate-string — serialize the vector to a JSON array.
-+      [\"fetch\" 42 \"Alice\"] → \"[\\\"fetch\\\",42,\\\"Alice\\\"]\"
-+
-+      Numbers become JSON numbers, strings become JSON strings,
-+      booleans become true/false, nil becomes null.
-+
-+   3. LibSciContext/dispatchHostCall args-json — the Java static
-+      method that calls through the single C function pointer into
-+      the host language.  The function name is already at index 0
-+      of the JSON array, so dispatchHostCall only needs ONE argument.
-+      Returns a JSON result string from the host callback.
-+
-+   4. json/parse-string raw-result true — parse the JSON back:
-+      \"{\\\"status\\\":\\\"ok\\\",\\\"value\\\":7}\"
-+      → {:status \"ok\" :value 7}
-+
-+      The `true` argument keywordizes keys: \"status\" → :status
-+
-+   5. If raw-result is not a string (edge case: the host returned
-+      something unexpected), return it as-is.  If JSON parsing
-+      fails (shouldn't happen with well-formed responses), return
-+      the raw string so the SCI script gets something useful
-+      rather than a cryptic parse-error exception."
-+  [& args]
-+  (let [args-json  (json/generate-string (vec args))
-+        ;; The function name is already at args-json[0] from the
-+        ;; (vec args) serialization above.  dispatchHostCall takes
-+        ;; a single String argument (the full JSON array).
-+        raw-result (sci.impl.LibSciContext/dispatchHostCall args-json)]
-+    (if (string? raw-result)
-+      (try (json/parse-string raw-result true)
-+           (catch Exception _ raw-result))
-+      raw-result)))
-+
-+(defn- make-host-call-fn
-+  "Creates a fresh closure that wraps host-call-impl.
-+
-+   WHY A FACTORY FUNCTION RATHER THAN A DIRECT VAR?
-+
-+   The :bindings map in SCI init expects a *function value* — the
-+   thing that will be called when the SCI script invokes the binding.
-+   We can't just use `host-call-impl` directly because:
-+
-+   - SCI needs a plain fn, not a var
-+   - Each context initialization gets its own closure (important if
-+     we ever support multiple concurrent contexts)
-+   - The closure captures nothing mutable from the outer scope, so
-+     there's no stale-reference risk
-+
-+   The returned fn uses & args to capture all arguments as a seq,
-+   then delegates to host-call-impl which does the actual work."
++(defn- get-ctx
++  "Get the current thread's SCI context, or nil if not yet initialized."
 +  []
-+  (fn [& args]
-+    (apply host-call-impl args)))
++  (get @contexts (.getId (Thread/currentThread))))
 +
-+;; ──────────────────────────────────────────────────────────────────
-+;;  BASE OPTIONS — initial SCI context configuration
-+;; ──────────────────────────────────────────────────────────────────
-+;;
-+;; This map is passed to sci.core/init when creating a fresh context.
-+;; It defines what the SCI script can see and call.
++(defn- set-ctx!
++  "Store the current thread's SCI context."
++  [ctx]
++  (swap! contexts assoc (.getId (Thread/currentThread)) ctx))
 +
-+(defn- base-opts
-+  "Returns the SCI initialization options map.
++;; ── Base SCI options ──
++;; defonce ensures the map and closure are created once at load time.
++;; Must be defined before get-or-init-ctx which references it.
 +
-+   :namespaces
-+   ───────────
-+   A map from namespace symbol → namespace contents map.
++(defonce base-opts
++  {:namespaces {'cheshire.core
++                {'generate-string json/generate-string
++                 'parse-string    json/parse-string}}
++   :bindings {'host-call
++              (fn [& args]
++                (let [args-json  (json/generate-string (vec args))
++                      raw-result (sci.impl.LibSciHost/dispatchHostCall args-json)]
++                  (if (string? raw-result)
++                    (try (json/parse-string raw-result true)
++                         (catch Exception e
++                           {:status "error"
++                            :message (str "Failed to parse host response: "
++                                          (.getMessage e))}))
++                    raw-result)))}})
 +
-+   'cheshire.core is pre-populated with its generate-string function.
-+   This lets SCI scripts use JSON directly:
-+
-+     (cheshire.core/generate-string {:a 1 :b 2})
-+     → \"{\\\"a\\\":1,\\\"b\\\":2}\"
-+
-+   If you want more cheshire functions (parse-string, etc.), add them:
-+     {'cheshire.core {'generate-string cheshire/generate-string
-+                      'parse-string     cheshire/parse-string}}
-+
-+   :classes
-+   ────────
-+   Symbol → Java class mappings exposed to SCI scripts.
-+
-+   'host-fn → sci.impl.LibSciContext — allows advanced scripts to call
-+   LibSciContext methods directly via Java interop:
-+     (.dispatchHostCall sci.impl.LibSciContext \"fetch\" json-str)
-+
-+   This is optional — host-call covers the normal case.  Exposing
-+   the class gives scripts an escape hatch for unusual situations.
-+
-+   :bindings
-+   ─────────
-+   Symbol → value pairs injected into the 'user namespace.
-+
-+   'host-call is bound to our bridge function.  SCI scripts can
-+   use (host-call \"name\" args...) without any require or import —
-+   it's just THERE, like a built-in.
-+
-+   The binding captures no mutable state (the function is pure),
-+   so it's safe across context resets."
++(defn- get-or-init-ctx
++  "Return current thread's context, creating one with base-opts if needed."
 +  []
-+  {:namespaces {'cheshire.core {'generate-string cheshire/generate-string}}
-+   :classes    {'host-fn sci.impl.LibSciContext}
-+   :bindings   {'host-call (make-host-call-fn)}})
++  (if-let [ctx (get-ctx)]
++    ctx
++    (let [new-ctx (sci/init base-opts)]
++      (set-ctx! new-ctx)
++      new-ctx)))
 +
-+;; ──────────────────────────────────────────────────────────────────
-+;;  PUBLIC API METHODS
-+;; ──────────────────────────────────────────────────────────────────
-+;;
-+;; These are the static methods called from LibSci.java's @CEntryPoints.
-+;; Method names follow the JVM convention: -methodName corresponds to
-+;; the :gen-class declaration [methodName [types] returnType].
-+;;
-+;; Every method that returns JSON follows this protocol:
-+;;   Success: {"status":"ok",   "value":<result-string>}
-+;;   Error:   {"status":"error","error":"<exception-type>",
-+;;                                "message":"<details>"}
-+;;
-+;; The uniform envelope means host code can check :status and branch
-+;; on "ok" vs "error" without knowing which entry point was called.
++;; ── Public API ──
 +
 +(defn -loadScript
-+  "Initialize or reuse the persistent SCI context and evaluate a script.
-+
-+   Called from: LibSci.loadScript() → @CEntryPoint load_script
-+   Input:  s — a Clojure source string (arbitrary number of forms)
-+   Output: JSON envelope string
-+
-+   STEP-BY-STEP WALKTHROUGH:
-+
-+   1. (or @ctx (sci/init (base-opts)))
-+      If the atom is nil, create a fresh SCI context using our base
-+      options (namespaces, classes, host-call binding).
-+      If the atom already holds a context, reuse it — all prior
-+      defs and state remain.
-+
-+   2. (sci/merge-opts c {})
-+      Merge additional options into the context.  We pass {} (empty)
-+      here because we already set up options in step 1.  The merge
-+      is defensive — if base-opts ever adds new bindings in a future
-+      version, existing contexts pick them up.
-+
-+   3. (reset! ctx ...)
-+      Store the (possibly updated) context back into the atom.
-+      Without this, the context would be used once and lost.
-+
-+   4. (sci/eval-string* @ctx s)
-+      Evaluate the script string in the context.  All top-level forms
-+      are evaluated in order.  Side effects (def, defn, defmacro,
-+      alter-var-root, swap! on atoms, etc.) modify the context.
-+
-+      Sci/eval-string* returns the value of the LAST form evaluated.
-+      For a script ending with (defn f ...), this is #'user/f (a var).
-+
-+   5. (json/generate-string {:status \"ok\" :value (str result)})
-+      Wrap the result.  (str result) converts any SCI value to its
-+      string representation so it fits cleanly in JSON.
-+
-+   ERROR HANDLING:
-+   The try/catch wraps everything.  If any step throws (parse error,
-+   eval error, etc.), we catch it and return a JSON error envelope.
-+   This prevents exceptions from propagating into Java, through the
-+   C FFI boundary, and crashing the host process.
-+
-+   TYPE OF EXCEPTION CAPTURED:
-+   (type e) gives the Java class name: \"java.lang.ArithmeticException\"
-+   .getMessage gives the detail: \"Divide by zero\"
-+   Together they give the host enough info for debugging."
++  "Load a Clojure script into the current thread's persistent SCI context."
 +  [s]
 +  (sci/binding [sci/out *out*]
-+    ;; sci/out bound to *out* so SCI's (println ...) reaches host stdout
 +    (try
-+      (let [c (or @ctx (sci/init (base-opts)))]
-+        (reset! ctx (sci/merge-opts c {}))
-+        (let [result (sci/eval-string* @ctx s)]
-+          (json/generate-string {:status "ok" :value (str result)})))
++      (let [c      (get-or-init-ctx)
++            result (sci/eval-string* c s)]
++        (json/generate-string {:status "ok" :value (str result)}))
 +      (catch Exception e
-+        (json/generate-string {:status  "error"
-+                               :error   (str (type e))
-+                               :message (.getMessage e)})))))
++        (json/generate-string
++          {:status "error" :error (str (type e)) :message (.getMessage e)})))))
 +
 +(defn -callFunction
-+  "Call a named function in the persistent context with EDN arguments.
-+
-+   Called from: LibSci.callFunction() → @CEntryPoint call_function
-+   Input:  fn-name  — e.g., \"greet\"
-+           args-edn — e.g., \"\\\"Alice\\\" 42\"
-+   Output: JSON envelope string
-+
-+   STEP-BY-STEP:
-+
-+   1. Check @ctx is not nil.  If it is, the host called call_function
-+      before load_script — return a clear error.
-+
-+   2. Build the S-expression by string concatenation:
-+        \"(\" + fn-name + \" \" + args-edn + \")\"
-+      Example: \"(greet \\\"Alice\\\" 42)\"
-+
-+      This is the simplest possible form — just splice the function
-+      name and EDN arguments into a list form.
-+
-+   3. (sci/eval-string* @ctx expr)
-+      Evaluate it in the persistent context.  The function name
-+      resolves against the namespaces loaded by load_script.
-+
-+   4. Wrap result in JSON envelope.
-+
-+   WHY EDN AND NOT JSON HERE?
-+   This entry point is a convenience for EDN-native Clojure values.
-+   Keywords (:foo), symbols ('bar), ratios (1/3), sets (#{a b}),
-+   and tagged literals (#inst \"...\") pass through naturally.
-+
-+   The cost: the host must construct valid EDN strings.  Strings
-+   must be double-quoted inside the args string, which means
-+   escaping: \"\\\\\\\"hello\\\\\\\"\" in C source.
-+
-+   For programmatic use where the host is generating arguments
-+   rather than writing them literally, the call_function_json
-+   entry point (if added) would take a JSON array instead."
++  "Call a named function in the current thread's context with EDN arguments."
 +  [fn-name args-edn]
 +  (sci/binding [sci/out *out*]
-+    (if (nil? @ctx)
-+      (json/generate-string
-+        {:status "error"
-+         :message "No context. Call load_script first."})
++    (if-let [c (get-ctx)]
 +      (try
 +        (let [expr   (str "(" fn-name " " args-edn ")")
-+              result (sci/eval-string* @ctx expr)]
++              result (sci/eval-string* c expr)]
 +          (json/generate-string {:status "ok" :value (str result)}))
 +        (catch Exception e
-+          (json/generate-string {:status  "error"
-+                                 :error   (str (type e))
-+                                 :message (.getMessage e)}))))))
++          (json/generate-string
++            {:status "error" :error (str (type e)) :message (.getMessage e)})))
++      (json/generate-string
++        {:status "error" :message "No context. Call load_script first."}))))
 +
 +(defn -evalInContext
-+  "Evaluate a complete Clojure expression in the persistent context.
-+
-+   Called from: LibSci.evalInContext() → @CEntryPoint eval_in_context
-+   Input:  s — a complete Clojure expression string
-+   Output: JSON envelope string
-+
-+   Unlike call_function which wraps EDN args into an S-expression,
-+   this takes ready-to-evaluate Clojure code.  It can be:
-+
-+   - A single expression:  \"(+ 1 2)\"
-+   - Multiple forms:       \"(def x 1) (println x) (+ x 2)\"
-+                            (result is value of last form)
-+   - Threading macros:     \"(->> (range 5) (map inc) (reduce +))\"
-+   - Inline functions:     \"((fn [x] (* x x)) 42)\"
-+   - Reference loaded vars: \"@counter\" or \"(var my-function)\"
-+
-+   This is the most flexible entry point — anything you could type
-+   at a SCI REPL prompt works here.
-+
-+   STEP-BY-STEP:
-+
-+   1. Check @ctx is not nil
-+   2. Evaluate the string directly with sci/eval-string*
-+   3. Wrap the result in JSON envelope
-+
-+   Same error handling as load_script and call_function."
++  "Evaluate a complete Clojure expression in the current thread's context."
 +  [s]
 +  (sci/binding [sci/out *out*]
-+    (if (nil? @ctx)
-+      (json/generate-string {:status "error" :message "No context."})
++    (if-let [c (get-ctx)]
 +      (try
-+        (let [result (sci/eval-string* @ctx s)]
++        (let [result (sci/eval-string* c s)]
 +          (json/generate-string {:status "ok" :value (str result)}))
 +        (catch Exception e
-+          (json/generate-string {:status  "error"
-+                                 :error   (str (type e))
-+                                 :message (.getMessage e)}))))))
++          (json/generate-string
++            {:status "error" :error (str (type e)) :message (.getMessage e)})))
++      (json/generate-string
++        {:status "error" :message "No context. Call load_script first."}))))
 +
 +(defn -resetContext
-+  "Destroy the persistent SCI context by setting the atom back to nil.
-+
-+   Called from: LibSci.resetContext() → @CEntryPoint reset_context
-+
-+   After calling this:
-+   - All defs, defns, atoms, and namespace modifications are gone
-+   - The next load_script will create a brand-new context
-+   - The old context becomes eligible for garbage collection
-+
-+   USE CASES:
-+   - Hot reload:   reset → load_script with modified code
-+   - State reset:  clear all accumulated atom state
-+   - Free memory:   release the context between usage phases
-+   - Reconfigure:   change base options and start over
-+
-+   There's no return value — this is fire-and-forget.  The host can
-+   verify success by noting that subsequent call_function calls
-+   will return \"No context\" errors until load_script is called again."
++  "Remove the current thread's context. Next load_script creates a fresh one."
 +  []
-+  (reset! ctx nil))
++  (swap! contexts dissoc (.getId (Thread/currentThread))))
 diff --git a/project.clj b/project.clj
-index bf1913a..d518951 100644
+index 7bcc555..173855b 100644
 --- a/project.clj
 +++ b/project.clj
-@@ -30,7 +30,7 @@
+@@ -31,7 +31,7 @@
                         :main sci.impl.main}
               :libsci {:dependencies [[cheshire "5.10.0"]]
                        :source-paths ["src" "libsci/src"]
 -                      :aot [sci.impl.libsci]}}
-+                      :aot [sci.impl.libsci sci.impl.libsci-context]}}
++                      :aot [sci.impl.libsci sci.impl.libsci-host]}}
    ;; for testing only
    :deploy-repositories [["clojars" {:url "https://clojars.org/repo"
                                      :username :env/clojars_user
+diff --git a/test/libsci_host_test.clj b/test/libsci_host_test.clj
+new file mode 100644
+index 0000000..e69f0a1
+--- /dev/null
++++ b/test/libsci_host_test.clj
+@@ -0,0 +1,58 @@
++(ns libsci-host-test
++  (:require [cheshire.core :as json]
++            [clojure.string :as str]
++            [clojure.test :refer [deftest is testing]]
++            [sci.impl.libsci-host :as host]))
++
++(deftest load-and-call
++  (testing "load a script and call a function defined in it"
++    (host/-resetContext)
++    (host/-loadScript "(defn add [x y] (+ x y))")
++    (let [result (host/-callFunction "add" "3 4")]
++      (is (= "7" (-> result json/parse-string (get "value")))))))
++
++(deftest eval-in-context
++  (testing "eval an expression in the persistent context"
++    (host/-resetContext)
++    (host/-loadScript "(def x 42)")
++    (let [result (host/-evalInContext "x")]
++      (is (= "42" (-> result json/parse-string (get "value")))))))
++
++(deftest host-call-error-no-dispatcher
++  (testing "host-call returns error when no dispatcher registered"
++    (host/-resetContext)
++    (let [result (host/-loadScript "(host-call \"add\" 3 4)")]
++      (is (= "error" (-> result json/parse-string (get "status")))))))
++
++(deftest context-reset-isolation
++  (testing "reset + reload gives independent state (thread isolation simulated)"
++    (host/-resetContext)
++    (host/-loadScript "(def x 1)")
++    (let [main-x (-> (host/-evalInContext "x") json/parse-string (get "value"))]
++      (is (= "1" main-x))
++      (host/-resetContext)
++      (host/-loadScript "(def x 2)")
++      (let [other-x (-> (host/-evalInContext "x") json/parse-string (get "value"))]
++        (is (= "2" other-x))))))
++
++(deftest load-script-error
++  (testing "parse error returns JSON error, not throw"
++    (host/-resetContext)
++    (let [result (host/-loadScript "(+ 1")
++          parsed (json/parse-string result)]
++      (is (= "error" (get parsed "status")))
++      (is (string? (get parsed "error"))))))
++
++(deftest call-function-with-keyword
++  (testing "call_function supports EDN keywords"
++    (host/-resetContext)
++    (host/-loadScript "(defn get-val [m k] (get m k))")
++    (let [result (host/-callFunction "get-val" "{:a 1 :b 2} :a")]
++      (is (= "1" (-> result json/parse-string (get "value")))))))
++
++(deftest cross-ns-call
++  (testing "call_function supports namespace-qualified fns"
++    (host/-resetContext)
++    (host/-loadScript "(ns my.ns) (defn calc [x] (* x 2))")
++    (let [result (host/-callFunction "my.ns/calc" "21")]
++      (is (= "42" (-> result json/parse-string (get "value")))))))
