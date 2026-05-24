@@ -13,7 +13,7 @@ index 5f9ce1f..0259547 100644
      (let [native-image (str (fs/path graalvm-home "bin"
                                       (if (fs/windows?) "native-image.cmd" "native-image")))]
 diff --git a/libsci/src/sci/impl/LibSci.java b/libsci/src/sci/impl/LibSci.java
-index cfe15fc..e6f86b1 100644
+index cfe15fc..1fae9ad 100644
 --- a/libsci/src/sci/impl/LibSci.java
 +++ b/libsci/src/sci/impl/LibSci.java
 @@ -6,6 +6,7 @@ import org.graalvm.nativeimage.c.type.CTypeConversion;
@@ -24,7 +24,7 @@ index cfe15fc..e6f86b1 100644
      @CEntryPoint(name = "eval_string")
      public static @CConst CCharPointer evalString(@CEntryPoint.IsolateThreadContext long isolateId, @CConst CCharPointer s) {
          String expr = CTypeConversion.toJavaString(s);
-@@ -14,4 +15,52 @@ public final class LibSci {
+@@ -14,4 +15,42 @@ public final class LibSci {
          CCharPointer value = holder.get();
          return value;
      }
