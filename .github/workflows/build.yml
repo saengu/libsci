@@ -12,7 +12,7 @@ on:
         required: false
         default: ""
         type: string
-      bridge_ref:
+      patch_ref:
         description: "apply host bridge patch"
         required: false
         default: "true"
@@ -63,7 +63,7 @@ jobs:
           echo "babashka/sci ref: $(git rev-parse --short HEAD)"
 
       - name: Apply patch inside submodule directory
-        if: ${{ inputs.bridge_ref == 'true' }}
+        if: ${{ inputs.patch_ref == 'true' }}
         working-directory: sci
         run: |
           git apply ../patches/host_bridge.patch
