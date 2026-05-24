@@ -1,7 +1,8 @@
 # Host Bridge Design -- Persistent Context + Host Function Dispatch
 
 - **Date**: 2026-05-23
-- **Status**: Draft (reviewed)
+- **Updated**: 2026-05-24 (aligned with implementation)
+- **Status**: Implemented
 
 ## Summary
 
@@ -24,19 +25,22 @@ Host Language (Zig/C/Rust/Go/...)
                  | C function pointer
                  v
 libsci shared library (GraalVM native-image)
-  +-------------------------------------+
-  | LibSciHost.java   (@CEntryPoints)   |
-  |   - HostDispatcher interface        |  <- direct cast, not toProxy()
-  |   - set_host_dispatcher / load_     |
-  |     script / call_function /        |
-  |     eval_in_context /               |
-  |     reset_context                   |
-  +-------------------------------------+
-  | libsci_host.clj   (Clojure bridge)  |
-  |   - ctx atom (persistent state)     |
-  |   - host-call JSON protocol         |
-  |   - base-init (cheshire + binding)  |
-  +-------------------------------------+
+  +------------------------------------------+
+  | LibSci.java        (@CEntryPoints)       |
+  |   - load_script / call_function /        |
+  |     eval_in_context / reset_context /    |
+  |     eval, eval_string                    |
+  +------------------------------------------+
+  | LibSciHost.java    (HostDispatcher)      |
+  |   - HostDispatcher interface             |  <- direct cast, not toProxy()
+  |   - set_host_dispatcher                  |
+  |   - dispatchHostCall (internal bridge)   |
+  +------------------------------------------+
+  | libsci_host.clj   (Clojure bridge)       |
+  |   - per-thread context atom              |
+  |   - host-call JSON protocol              |
+  |   - base-opts (cheshire + binding)       |
+  +------------------------------------------+
 ```
 
 ## C API
@@ -45,9 +49,10 @@ libsci shared library (GraalVM native-image)
 void     set_host_dispatcher(thread, fn_ptr);   // one-time registration
 char*    load_script(thread, script);            // load into persistent ctx
 char*    call_function(thread, fn_name, edn_args); // call function in ctx
-char*    eval_in_context(thread, expr);                  // eval in persistent ctx
-void     reset_context(thread);                       // destroy ctx
-char*    eval(thread, expr);                      // eval in fresh ctx (renamed from eval_string)
+char*    eval_in_context(thread, expr);          // eval in persistent ctx
+void     reset_context(thread);                  // destroy ctx
+char*    eval_string(thread, expr);              // eval in fresh ctx (original)
+char*    eval(thread, expr);                     // eval in fresh ctx (added alongside eval_string)
 ```
 
 All `char*` returns are JSON envelopes:
@@ -63,7 +68,7 @@ Direction: SCI script -> Host language.
 ```
 SCI: (host-call "add" 3 4)
   -> Clojure: json/generate-string ["add", 3, 4]
-  -> Java: HostDispatcher.dispatch(cString)
+  -> Java: HostDispatcher.execute(cString)
   -> Host C function: parse JSON, hashmap lookup, execute
   -> Returns: {"status":"ok","value":7}
   -> Clojure: json/parse-string, return :value
@@ -112,26 +117,53 @@ call_function(thread, "my-app/process-order",
 generates a dynamic proxy at runtime, which is forbidden in GraalVM native-image
 (closed world, no runtime code generation).
 
-**Fix**: Use direct cast instead:
+**Fix**: Use direct cast with `@InvokeCFunctionPointer`:
 
 ```java
 public interface HostDispatcher extends CFunctionPointer {
-    @CFunction
-    CCharPointer dispatch(CCharPointer jsonArgs);
+    @InvokeCFunctionPointer
+    CCharPointer execute(CCharPointer argPtr);
 }
 
-private static HostDispatcher dispatcher = WordFactory.nullPointer();
+private static volatile long dispatcherPtr = 0;
 
 @CEntryPoint(name = "set_host_dispatcher")
-public static void setHostDispatcher(long isolateId, long fnPtr) {
-    dispatcher = (HostDispatcher) WordFactory.pointer(fnPtr);
+public static void setHostDispatcher(
+        @CEntryPoint.IsolateThreadContext long isolateId,
+        long fnPtr) {
+    dispatcherPtr = fnPtr;
+}
+
+public static String dispatchHostCall(String argsJson) {
+    long ptr = dispatcherPtr;
+    if (ptr == 0) {
+        return "{\"status\":\"error\","
+             + "\"message\":\"No host dispatcher registered.\"}";
+    }
+    try {
+        CTypeConversion.CCharPointerHolder holder =
+            CTypeConversion.toCString(argsJson);
+        HostDispatcher disp = (HostDispatcher) WordFactory.pointer(ptr);
+        CCharPointer result = disp.execute(holder.get());
+        return CTypeConversion.toJavaString(result);
+    } catch (Exception e) {
+        return "{\"status\":\"error\","
+             + "\"message\":\"dispatcher call failed: "
+             + e.getMessage() + "\"}";
+    }
 }
 ```
 
-The `@CFunction` annotation lets GraalVM generate the calling trampoline at
-**build time**. `(HostDispatcher) WordFactory.pointer(ptr)` is a Word type cast,
-not a proxy -- it requires no runtime code generation. This is the same Word type
-system used in the existing working code (`CCharPointer value = holder.get()`).
+`@InvokeCFunctionPointer` (replacing the earlier `@CFunction` annotation) tells
+GraalVM to generate the calling trampoline at **build time**. The raw pointer is
+stored as a `long` and cast to `HostDispatcher` on each call via
+`(HostDispatcher) WordFactory.pointer(ptr)` — a Word type cast, not a proxy,
+requiring no runtime code generation. This is the same Word type system used in
+the existing working code (`CCharPointer value = holder.get()`).
+
+The `volatile` qualifier on `dispatcherPtr` ensures visibility across threads
+without requiring the pointer itself to be stored in a Word-type field. The
+null check uses `== 0` instead of `isNull()` since the field is a primitive.
 
 ## C String Lifetime Contract
 
@@ -325,7 +357,7 @@ First call on each thread -> init -> subsequent calls on same thread reuse.
 
 | Component | Mechanism | Safety |
 |---|---|---|
-| `dispatcher` field | `volatile`, write-once | [OK] All threads see same value |
+| `dispatcherPtr` field | `volatile long`, write-once | [OK] All threads see same value |
 | `contexts` atom | CAS swap per-thread key | [OK] Per-thread key prevents races |
 | `CCharPointerHolder` | Stack-local | [OK] Thread-isolated |
 | Host dispatcher buffer | Synchronous callback on calling thread | [OK] No concurrent access |
@@ -409,13 +441,21 @@ First call on each thread -> `sci/init` -> subsequent calls reuse. No unnecessar
 ### `defonce` base options
 
 ```clojure
+;; Reflection bridge avoids AOT dependency cycle between libsci_host.clj
+;; and LibSciHost.java. The Clojure AOT compiler can't resolve the Java class
+;; at compile time, so we look it up at runtime instead.
+(defn- dispatch-host-call [args-json]
+  (let [cls  (Class/forName "sci.impl.LibSciHost")
+        meth (.getMethod cls "dispatchHostCall" (into-array Class [String]))]
+    (.invoke meth nil (into-array Object [args-json]))))
+
 (defonce base-opts
   {:namespaces {'cheshire.core
                 {'generate-string json/generate-string
                  'parse-string    json/parse-string}}
    :bindings {'host-call (fn [& args]
                           (let [args-json  (json/generate-string (vec args))
-                                raw-result (sci.impl.LibSciHost/dispatchHostCall args-json)]
+                                raw-result (dispatch-host-call args-json)]
                             (if (string? raw-result)
                               (try (json/parse-string raw-result true)
                                    (catch Exception e
@@ -446,14 +486,14 @@ The host-side batch handler iterates and returns aggregated results.
 ## Files
 
 ### New
-- `libsci/src/sci/impl/LibSciHost.java` -- @CEntryPoints + HostDispatcher
-- `libsci/src/sci/impl/libsci_host.clj` -- Clojure bridge
-- `tests/` -- test directory
-- `docs/superpowers/specs/` -- this document
+- `libsci/src/sci/impl/LibSciHost.java` -- HostDispatcher interface + set_host_dispatcher @CEntryPoint + dispatchHostCall
+- `libsci/src/sci/impl/libsci_host.clj` -- Clojure bridge (per-thread context, JSON host-call protocol, base-opts)
 
 ### Modified
+- `libsci/src/sci/impl/LibSci.java` -- add load_script, call_function, eval_in_context, reset_context, eval @CEntryPoints
 - `project.clj` -- add `sci.impl.libsci-host` to `:aot`
 - `libsci/bb/libsci_tasks.clj` -- add `LibSciHost.java` to javac command
+- `reflection.json` -- add `sci.impl.LibSciHost.dispatchHostCall` entry for native-image
 
 ## Testing
 
@@ -491,7 +531,7 @@ Run without GraalVM, test Clojure bridge logic directly:
 ```
 
 ### Level 2: Native-image Build Verification
-Compile libsci with `bb libsci:compile` to verify @CEntryPoint + @CFunction
+Compile libsci with `bb libsci:compile` to verify @CEntryPoint + @InvokeCFunctionPointer
 compile correctly in GraalVM 23 CE --shared build.
 
 ### Level 3: C Integration Test
@@ -509,7 +549,7 @@ A minimal C program that:
 |---|---|---|
 | host-call injection | Low | Only loaded scripts can call it; host dispatcher controls routing |
 | call_function EDN injection | Low | Caller is the host language, not untrusted input |
-| Dispatcher null pointer | Low | `.isNull()` check before dispatch, returns JSON error |
+| Dispatcher null pointer | Low | `ptr == 0` check before dispatch, returns JSON error |
 | Clojure eval exception | Low | All eval wrapped in `try/catch`, returns JSON error envelope |
 | C string buffer overflow | Medium | Host responsibility; documented contract for thread-local buffer |
 | Per-thread context race | Low | `contexts` map indexed by thread-id; no cross-thread writes |
@@ -561,6 +601,33 @@ The recommended "immediate copy" pattern (see SC String Lifetime Contract) adds
   error envelope; SCI scripts can now uniformly handle host dispatcher errors.
 - **Batch processing**: Added guidance to avoid per-item `host-call` in tight
   loops; recommended pattern is single batch call with vector argument.
+
+### Third review (2026-05-24) -- implementation alignment
+
+- **`@InvokeCFunctionPointer` replaces `@CFunction`**: The GraalVM 23 CE
+  annotation for marking the single abstract method on a `CFunctionPointer`
+  subinterface is `@InvokeCFunctionPointer`, not `@CFunction`. This is what
+  triggers native-image to generate the call trampoline at build time.
+- **Raw `long` storage instead of `HostDispatcher` field**: The pointer is stored
+  as `volatile long dispatcherPtr = 0` and cast to `HostDispatcher` on each call
+  inside `dispatchHostCall`. This avoids a field whose type depends on the
+  GraalVM Word type system, simplifying the static initializer. The null check
+  uses `ptr == 0` instead of `isNull()`.
+- **Method renamed `execute` (not `dispatch`)**: The interface method is `execute`
+  with parameter `argPtr`, matching the execution-semantics naming convention.
+- **@CEntryPoints split across two Java files**: The host bridge entry points
+  (`load_script`, `call_function`, `eval_in_context`, `reset_context`, `eval`)
+  are added to the existing `LibSci.java` rather than `LibSciHost.java`.
+  `LibSciHost.java` contains only the `HostDispatcher` interface,
+  `set_host_dispatcher`, and the internal `dispatchHostCall` bridge method.
+- **Reflection bridge in Clojure**: The Clojure bridge uses `Class/forName` +
+  `getMethod` + `.invoke` to call `LibSciHost/dispatchHostCall` instead of
+  direct Java interop. This avoids an AOT compilation dependency cycle between
+  the Clojure and Java sources. The `reflection.json` file registers
+  `dispatchHostCall` for native-image closed-world analysis.
+- **`eval_string` preserved alongside `eval`**: The original `eval_string`
+  @CEntryPoint is kept for backward compatibility; `eval` is added as an
+  additional entry point, both delegating to the same Clojure implementation.
 
 ### Alternatives considered and rejected
 
