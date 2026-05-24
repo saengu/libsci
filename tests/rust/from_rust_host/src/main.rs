@@ -83,8 +83,8 @@ fn main() {
         unsafe {
             let thread = create_isolate();
             set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
-            let r1 = from_c_str(eval(thread as i64, c_str("(def x 42)")));
-            let r2 = from_c_str(eval(thread as i64,
+            let r1 = from_c_str(eval_string(thread as i64, c_str("(def x 42)")));
+            let r2 = from_c_str(eval_string(thread as i64,
                 c_str("(try x (catch Exception e \"err\"))")));
             graal_tear_down_isolate(thread);
             r1.contains("#'user/x") && r2.contains("err")

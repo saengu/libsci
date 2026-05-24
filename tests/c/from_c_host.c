@@ -3,7 +3,7 @@
  *
  * Tests all C entry points:
  *   set_host_dispatcher, load_script, call_function,
- *   eval_in_context, reset_context, eval
+ *   eval_in_context, reset_context, eval_string
  *
  * Host passes a raw function pointer to set_host_dispatcher.
  * libsci calls it directly via CFunctionPointer — no callPtr
@@ -29,7 +29,7 @@ char* load_script(long long thread, const char* script);
 char* call_function(long long thread, const char* fn_name, const char* args_edn);
 char* eval_in_context(long long thread, const char* expr);
 void  reset_context(long long thread);
-char* eval(long long thread, const char* expr);
+char* eval_string(long long thread, const char* expr);
 
 /* ------------------------------------------------------------------ */
 /*  Host dispatcher callback                                          */
@@ -105,11 +105,11 @@ static int test_eval_fresh(void) {
     graal_isolatethread_t* thread = NULL;
     if (!_test_setup(&thread)) return 0;
 
-    char* r = eval((long long)thread, "(def x 42)");
-    ASSERT(strstr(r, "#'user/x") != NULL, "def should succeed in eval");
+    char* r = eval_string((long long)thread, "(def x 42)");
+    ASSERT(strstr(r, "#'user/x") != NULL, "def should succeed in eval_string");
 
-    r = eval((long long)thread, "(try x (catch Exception e \"err\"))");
-    ASSERT(strstr(r, "err") != NULL, "x should not be visible after fresh eval");
+    r = eval_string((long long)thread, "(try x (catch Exception e \"err\"))");
+    ASSERT(strstr(r, "err") != NULL, "x should not be visible after fresh eval_string");
 
     graal_tear_down_isolate(thread);
     return 1;

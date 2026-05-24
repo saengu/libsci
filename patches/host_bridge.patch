@@ -66,16 +66,6 @@ index cfe15fc..e6f86b1 100644
 +            @CEntryPoint.IsolateThreadContext long id) {
 +        sci.impl.libsci_host.resetContext();
 +    }
-+
-+    @CEntryPoint(name = "eval")
-+    public static @CConst CCharPointer eval(
-+            @CEntryPoint.IsolateThreadContext long id,
-+            @CConst CCharPointer s) {
-+        String expr = CTypeConversion.toJavaString(s);
-+        String result = sci.impl.libsci.evalString(expr);
-+        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
-+        return holder.get();
-+    }
  }
 diff --git a/libsci/src/sci/impl/LibSciHost.java b/libsci/src/sci/impl/LibSciHost.java
 new file mode 100644
