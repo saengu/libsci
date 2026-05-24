@@ -25,14 +25,6 @@ macro_rules! test {
     }};
 }
 
-// callPtr: imported by libsci.so via @CFunction static native.
-// The host MUST provide this symbol as extern "C".
-#[no_mangle]
-pub extern "C" fn callPtr(fn_ptr: i64, arg_ptr: i64) -> i64 {
-    let disp: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(fn_ptr) };
-    disp(arg_ptr)
-}
-
 unsafe fn c_str(s: &str) -> *const c_char {
     CString::new(s).unwrap().into_raw()
 }

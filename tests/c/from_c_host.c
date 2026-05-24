@@ -5,8 +5,9 @@
  *   set_host_dispatcher, load_script, call_function,
  *   eval_in_context, reset_context, eval
  *
- * The host MUST define callPtr() -- libsci imports this symbol
- * via @CFunction static native to call through a C function pointer.
+ * Host passes a raw function pointer to set_host_dispatcher.
+ * libsci calls it directly via CFunctionPointer — no callPtr
+ * bridge needed on the host side.
  *
  * Build: gcc -o from_c_host from_c_host.c -I../../sci/libsci/target \
  *        -L../../sci/libsci/target -lsci
@@ -29,16 +30,6 @@ char* call_function(long long thread, const char* fn_name, const char* args_edn)
 char* eval_in_context(long long thread, const char* expr);
 void  reset_context(long long thread);
 char* eval(long long thread, const char* expr);
-
-/* ------------------------------------------------------------------ */
-/*  callPtr: imported by libsci.so via @CFunction static native.      */
-/*  MUST be defined by the host.                                      */
-/* ------------------------------------------------------------------ */
-
-long long callPtr(long long fn_ptr, long long arg_ptr) {
-    long long (*disp)(long long) = (long long (*)(long long))(intptr_t)fn_ptr;
-    return disp(arg_ptr);
-}
 
 /* ------------------------------------------------------------------ */
 /*  Host dispatcher callback                                          */

@@ -79,20 +79,25 @@ index cfe15fc..e6f86b1 100644
  }
 diff --git a/libsci/src/sci/impl/LibSciHost.java b/libsci/src/sci/impl/LibSciHost.java
 new file mode 100644
-index 0000000..03bd9c2
+index 0000000..2d840cd
 --- /dev/null
 +++ b/libsci/src/sci/impl/LibSciHost.java
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,44 @@
 +package sci.impl;
 +
 +import org.graalvm.nativeimage.c.function.CEntryPoint;
-+import org.graalvm.nativeimage.c.function.CFunction;
++import org.graalvm.nativeimage.c.function.CFunctionPointer;
++import org.graalvm.nativeimage.c.function.InvokeCFunctionPointer;
 +import org.graalvm.nativeimage.c.type.CCharPointer;
 +import org.graalvm.nativeimage.c.type.CTypeConversion;
-+import org.graalvm.word.Pointer;
 +import org.graalvm.word.WordFactory;
 +
 +public final class LibSciHost {
++
++    public interface HostDispatcher extends CFunctionPointer {
++        @InvokeCFunctionPointer
++        CCharPointer execute(CCharPointer argPtr);
++    }
 +
 +    private static volatile long dispatcherPtr = 0;
 +
@@ -103,12 +108,6 @@ index 0000000..03bd9c2
 +        dispatcherPtr = fnPtr;
 +    }
 +
-+    // Imported from host: calls through a C function pointer.
-+    // The HOST application must define this function.
-+    @CFunction("callPtr")
-+    static native Pointer callPtr(long fnPtr, Pointer argPtr);
-+
-+    @SuppressWarnings("cast")
 +    public static String dispatchHostCall(String argsJson) {
 +        long ptr = dispatcherPtr;
 +        if (ptr == 0) {
@@ -118,8 +117,8 @@ index 0000000..03bd9c2
 +        try {
 +            CTypeConversion.CCharPointerHolder holder =
 +                CTypeConversion.toCString(argsJson);
-+            Pointer resultPtr = callPtr(ptr, (Pointer) holder.get());
-+            CCharPointer result = (CCharPointer) resultPtr;
++            HostDispatcher disp = (HostDispatcher) WordFactory.pointer(ptr);
++            CCharPointer result = disp.execute(holder.get());
 +            return CTypeConversion.toJavaString(result);
 +        } catch (Exception e) {
 +            return "{\"status\":\"error\","

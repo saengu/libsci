@@ -4,25 +4,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const include_path = b.path("../../sci/libsci/target");
+    const include_path = b.path("../sci/libsci/target");
     const translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("../../sci/libsci/target/libsci.h"),
+        .root_source_file = b.path("../sci/libsci/target/libsci.h"),
         .target = target,
         .optimize = optimize,
     });
     translate_c.addIncludePath(include_path);
     const libsci_module = translate_c.createModule();
 
-    const root_module = b.createModule(.{
-        .root_source_file = b.path("from_zig_host.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-
     const exe = b.addExecutable(.{
-        .name = "from_zig_host",
-        .root_module = root_module,
+        .name = "sci-host",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig-host.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
     });
 
     exe.root_module.addImport("libsci", libsci_module);
@@ -35,6 +33,6 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    const run_step = b.step("run", "Run the integration test");
+    const run_step = b.step("run", "Run the example");
     run_step.dependOn(&run_cmd.step);
 }
