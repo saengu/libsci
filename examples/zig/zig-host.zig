@@ -1,4 +1,6 @@
-//! Zig host application for libsci — demonstrates host-call round-trips.
+//! Zig host application for libsci — demonstrates:
+//! 1. host-call round-trips (explicit dispatch)
+//! 2. register_namespaces (transparent function calls)
 
 const std = @import("std");
 const c = @import("libsci");
@@ -15,6 +17,15 @@ fn resultOk(value: []const u8) [*:0]const u8 {
     return s.ptr;
 }
 
+fn resultOkRaw(value: []const u8) [*:0]const u8 {
+    const s = std.fmt.bufPrintZ(&result_buf, "{s}{s}{s}", .{
+        "{\"status\":\"ok\",\"value\":\"",
+        value,
+        "\"}",
+    }) catch unreachable;
+    return s.ptr;
+}
+
 fn resultErr(msg: []const u8) [*:0]const u8 {
     const s = std.fmt.bufPrintZ(&result_buf, "{s}{s}{s}", .{
         "{\"status\":\"error\",\"message\":\"",
@@ -24,82 +35,61 @@ fn resultErr(msg: []const u8) [*:0]const u8 {
     return s.ptr;
 }
 
-// ── JSON array parser ──────────────────────────────────────────
-const JsonArg = union(enum) {
-    null_val,
-    bool_val: bool,
-    int_val: i64,
-    float_val: f64,
-    string_val: []const u8,
-};
-
-fn parseJsonArray(json: [:0]const u8, allocator: std.mem.Allocator) !std.ArrayList(JsonArg) {
-    var args: std.ArrayList(JsonArg) = .empty;
-    errdefer args.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < json.len and (json[i] == ' ' or json[i] == '[')) : (i += 1) {}
-    while (i < json.len and json[i] != ']') {
-        while (i < json.len and (json[i] == ' ' or json[i] == ',')) : (i += 1) {}
-        if (i >= json.len or json[i] == ']') break;
-
-        if (json[i] == '"') {
-            i += 1;
-            const start = i;
-            while (i < json.len and json[i] != '"') : (i += 1) {}
-            try args.append(allocator, .{ .string_val = json[start..i] });
-            i += 1;
-        } else if (json[i] == 't' or json[i] == 'f') {
-            try args.append(allocator, .{ .bool_val = json[i] == 't' });
-            i += if (json[i] == 't') @as(usize, 4) else 5;
-        } else if (json[i] == 'n') {
-            try args.append(allocator, .{ .null_val = {} });
-            i += 4;
-        } else if (std.ascii.isDigit(json[i]) or json[i] == '-') {
-            const start = i;
-            var is_float = false;
-            while (i < json.len and (std.ascii.isDigit(json[i]) or
-                json[i] == '-' or json[i] == '.' or
-                json[i] == 'e' or json[i] == 'E' or json[i] == '+'))
-            {
-                if (json[i] == '.' or json[i] == 'e' or json[i] == 'E') is_float = true;
-                i += 1;
-            }
-            if (is_float)
-                try args.append(allocator, .{ .float_val = try std.fmt.parseFloat(f64, json[start..i]) })
-            else
-                try args.append(allocator, .{ .int_val = try std.fmt.parseInt(i64, json[start..i], 10) });
-        } else {
-            i += 1;
-        }
+// ── Simple JSON object parser ────────────────────────────────
+// Returns value for a top-level key in a flat JSON object.
+fn getJsonValue(json: []const u8, key: []const u8) ?[]const u8 {
+    const search = try std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key});
+    defer std.heap.page_allocator.free(search);
+    const pos = (std.mem.indexOf(u8, json, search) orelse return null) + search.len;
+    var end = pos;
+    if (json[pos] == '"') {
+        end += 1;
+        while (end < json.len and json[end] != '"') : (end += 1) {}
+        return json[pos + 1 .. end];
     }
-    return args;
+    return null;
 }
 
-// ── Host callback handlers ─────────────────────────────────────
+// ── Host callback handlers (legacy host-call style) ──────────
+
 export fn host_add(args_json: [*:0]const u8) callconv(.c) [*:0]const u8 {
-    const parsed = parseJsonArray(std.mem.span(args_json), std.heap.page_allocator)
-        catch return resultErr("parse error");
-    defer @constCast(&parsed).deinit(std.heap.page_allocator);
-    if (parsed.items.len < 3) return resultErr("expected 2 numbers");
-    var buf: [64]u8 = undefined;
-    const val = std.fmt.bufPrint(&buf, "{d}", .{ parsed.items[1].int_val + parsed.items[2].int_val })
-        catch "overflow";
+    // With unified JSON format, args_json is:
+    // {"fn":"host-add","args":[3,4]}
+    // Extract the args array and sum the numbers.
+    const s = std.mem.span(args_json);
+    var i: usize = 0;
+    var a: i64 = 0;
+    var b: i64 = 0;
+    var found: u2 = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '-' or std.ascii.isDigit(s[i])) {
+            const start = i;
+            while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '-')) : (i += 1) {}
+            const val = std.fmt.parseInt(i64, s[start..i], 10) catch 0;
+            if (found == 0) { a = val; found = 1; }
+            else if (found == 1) { b = val; found = 2; }
+        }
+    }
+    var buf: [32]u8 = undefined;
+    const val = std.fmt.bufPrint(&buf, "{d}", .{a + b}) catch "overflow";
     return resultOk(val);
 }
 
 export fn host_greet(args_json: [*:0]const u8) callconv(.c) [*:0]const u8 {
-    const parsed = parseJsonArray(std.mem.span(args_json), std.heap.page_allocator)
-        catch return resultErr("parse error");
-    defer @constCast(&parsed).deinit(std.heap.page_allocator);
-    if (parsed.items.len < 2) return resultErr("expected 1 argument");
+    const s = std.mem.span(args_json);
+    var i: usize = 0;
+    while (i < s.len and s[i] != '"') : (i += 1) {}
+    if (i >= s.len) return resultErr("no string arg");
+    i += 1;
+    const start = i;
+    while (i < s.len and s[i] != '"') : (i += 1) {}
     var buf: [128]u8 = undefined;
-    const val = std.fmt.bufPrint(&buf, "\"Hello, {s}!\"", .{ parsed.items[1].string_val })
-        catch "\"overflow\"";
-    return resultOk(val);
+    const val = std.fmt.bufPrint(&buf, "\"Hello, {s}!\"", .{s[start..i]}) catch "\"overflow\"";
+    return resultOkRaw(val);
 }
 
-// ── Host dispatcher ────────────────────────────────────────────
+// ── Host dispatcher (handles both legacy and registered calls) ─
+
 var handlers: std.StringHashMap(*const fn ([*:0]const u8) callconv(.c) [*:0]const u8) = undefined;
 
 fn register(comptime name: []const u8, handler: *const fn ([*:0]const u8) callconv(.c) [*:0]const u8) !void {
@@ -108,6 +98,37 @@ fn register(comptime name: []const u8, handler: *const fn ([*:0]const u8) callco
 
 export fn host_dispatcher(args_json: [*:0]const u8) callconv(.c) [*:0]const u8 {
     const s = std.mem.span(args_json);
+
+    // Check if this is a registered namespace call (has "ns" field)
+    if (std.mem.indexOf(u8, s, "\"ns\"") != null) {
+        // Registered namespace calls come from create-host-binding closures.
+        // Format: {"ns":"math","fn":"add","args":[1,2]}
+        if (std.mem.indexOf(u8, s, "\"math\"") != null and
+            std.mem.indexOf(u8, s, "\"add\"") != null)
+        {
+            // Extract the args and compute the result
+            var i: usize = 0;
+            var a: i64 = 0;
+            var b: i64 = 0;
+            var found: u2 = 0;
+            while (i < s.len) : (i += 1) {
+                if (s[i] == '-' or std.ascii.isDigit(s[i])) {
+                    const start = i;
+                    while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '-')) : (i += 1) {}
+                    const val = std.fmt.parseInt(i64, s[start..i], 10) catch 0;
+                    if (found == 0) { a = val; found = 1; }
+                    else if (found == 1) { b = val; found = 2; }
+                }
+            }
+            var buf: [32]u8 = undefined;
+            const val = std.fmt.bufPrint(&buf, "{d}", .{a + b}) catch "overflow";
+            return resultOk(val);
+        }
+        return resultErr("unknown registered function");
+    }
+
+    // Legacy host-call: {"fn":"host-add","args":[3,4]}
+    // Extract the function name from the "fn" field
     var i: usize = 0;
     while (i < s.len and s[i] != '"') : (i += 1) {}
     if (i >= s.len) return resultErr("no opening quote");
@@ -132,7 +153,12 @@ pub fn main() !void {
     _ = c.graal_create_isolate(null, &isolate, &thread);
     defer _ = c.graal_tear_down_isolate(thread);
 
+    // Register the dispatcher
     c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
+
+    // ── Example 1: host-call (explicit dispatch) ─────────────
+    // Scripts call (host-call "host-add" x y) which goes through the dispatcher.
+    std.debug.print("=== Example 1: host-call ===\n", .{});
 
     _ = c.load_script(@intCast(@intFromPtr(thread)),
         \\(defn compute [x y]
@@ -147,4 +173,25 @@ pub fn main() !void {
         \\(let [r (compute 10 20)] (str "got " (:sum r)))
     );
     std.debug.print("eval: {s}\n", .{ std.mem.span(r2) });
+
+    // ── Example 2: register_namespaces (transparent calls) ──
+    // Register a "math" namespace, then call (math/add 1 2) directly.
+    std.debug.print("\n=== Example 2: register_namespaces ===\n", .{});
+
+    _ = c.register_namespaces(@intCast(@intFromPtr(thread)),
+        "{\"namespaces\":{\"math\":[\"add\",\"subtract\"]}}"
+    );
+
+    const r3 = c.eval_in_context(@intCast(@intFromPtr(thread)), "(math/add 1 2)");
+    std.debug.print("(math/add 1 2): {s}\n", .{ std.mem.span(r3) });
+
+    // Mix registered and host-call
+    _ = c.load_script(@intCast(@intFromPtr(thread)),
+        \\(defn double-and-add [x y]
+        \\  (let [doubled (* 2 (math/add x y))]
+        \\    (host-call "host-greet" (str "result: " doubled))))
+    );
+
+    const r4 = c.call_function(@intCast(@intFromPtr(thread)), "double-and-add", "5 7");
+    std.debug.print("double-and-add(5,7): {s}\n", .{ std.mem.span(r4) });
 }

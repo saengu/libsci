@@ -41,6 +41,13 @@ unsafe fn create_isolate() -> *mut graal_isolatethread_t {
 }
 
 unsafe extern "C" fn host_dispatcher(json_args: *const c_char) -> *const c_char {
+    let s = CStr::from_ptr(json_args).to_str().unwrap_or("");
+    if s.contains("\"ns\"") {
+        if s.contains("\"math\"") && s.contains("\"add\"") {
+            return CString::new("{\"status\":\"ok\",\"value\":7}").unwrap().into_raw();
+        }
+        return CString::new("{\"status\":\"ok\",\"value\":0}").unwrap().into_raw();
+    }
     CString::new("{\"status\":\"ok\",\"value\":7}").unwrap().into_raw()
 }
 
@@ -137,6 +144,42 @@ fn main() {
                 thread as i64, c_str("my.ns/calc"), c_str("21")));
             graal_tear_down_isolate(thread);
             r.contains("\"value\":\"42\"")
+        }
+    });
+
+    test!("register_namespaces", {
+        unsafe {
+            let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
+            let r1 = from_c_str(register_namespaces(thread as i64,
+                c_str("{\"namespaces\":{\"math\":[\"add\",\"subtract\"]}}")));
+            let ok = r1.contains("\"status\":\"ok\"");
+            let r2 = from_c_str(load_script(thread as i64, c_str("(math/add 1 2)")));
+            let ok2 = ok && r2.contains("\"status\":\"ok\"");
+            graal_tear_down_isolate(thread);
+            ok2
+        }
+    });
+
+    test!("register_namespaces_after_load", {
+        unsafe {
+            let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
+            load_script(thread as i64, c_str("(def x 42)"));
+            let r = from_c_str(register_namespaces(thread as i64,
+                c_str("{\"namespaces\":{\"late\":[\"fn\"]}}")));
+            graal_tear_down_isolate(thread);
+            r.contains("\"status\":\"ok\"")
+        }
+    });
+
+    test!("register_namespaces_error", {
+        unsafe {
+            let thread = create_isolate();
+            set_host_dispatcher(thread as i64, &host_dispatcher as *const _ as i64);
+            let r = from_c_str(register_namespaces(thread as i64, c_str("not-json")));
+            graal_tear_down_isolate(thread);
+            r.contains("\"status\":\"error\"")
         }
     });
 

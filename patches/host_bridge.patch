@@ -1,5 +1,5 @@
 diff --git a/libsci/bb/libsci_tasks.clj b/libsci/bb/libsci_tasks.clj
-index 5f9ce1f..0259547 100644
+index 5f9ce1f..e07a1d1 100644
 --- a/libsci/bb/libsci_tasks.clj
 +++ b/libsci/bb/libsci_tasks.clj
 @@ -43,7 +43,8 @@
@@ -12,8 +12,18 @@ index 5f9ce1f..0259547 100644
  
      (let [native-image (str (fs/path graalvm-home "bin"
                                       (if (fs/windows?) "native-image.cmd" "native-image")))]
+@@ -157,4 +158,9 @@
+   (let [{:keys [fail error]} (run-all-tests (re-pattern (str (namespace ::ns))))]
+     (System/exit (if (pos? (+ fail error)) 1 0))))
+ 
++(defn test-jvm
++  "Run libsci-host JVM unit tests."
++  []
++  (p/shell "lein" "with-profiles" "+libsci" "run" "-m" "clojure.main" "test/run_libsci_host_tests.clj"))
++
+ 
 diff --git a/libsci/src/sci/impl/LibSci.java b/libsci/src/sci/impl/LibSci.java
-index cfe15fc..1fae9ad 100644
+index cfe15fc..a033314 100644
 --- a/libsci/src/sci/impl/LibSci.java
 +++ b/libsci/src/sci/impl/LibSci.java
 @@ -6,6 +6,7 @@ import org.graalvm.nativeimage.c.type.CTypeConversion;
@@ -24,7 +34,7 @@ index cfe15fc..1fae9ad 100644
      @CEntryPoint(name = "eval_string")
      public static @CConst CCharPointer evalString(@CEntryPoint.IsolateThreadContext long isolateId, @CConst CCharPointer s) {
          String expr = CTypeConversion.toJavaString(s);
-@@ -14,4 +15,42 @@ public final class LibSci {
+@@ -14,4 +15,52 @@ public final class LibSci {
          CCharPointer value = holder.get();
          return value;
      }
@@ -65,6 +75,16 @@ index cfe15fc..1fae9ad 100644
 +    public static void resetContext(
 +            @CEntryPoint.IsolateThreadContext long id) {
 +        sci.impl.libsci_host.resetContext();
++    }
++
++    @CEntryPoint(name = "register_namespaces")
++    public static @CConst CCharPointer registerNamespaces(
++            @CEntryPoint.IsolateThreadContext long id,
++            @CConst CCharPointer regsJson) {
++        String json = CTypeConversion.toJavaString(regsJson);
++        String result = sci.impl.libsci_host.registerNamespaces(json);
++        CTypeConversion.CCharPointerHolder holder = CTypeConversion.toCString(result);
++        return holder.get();
 +    }
  }
 diff --git a/libsci/src/sci/impl/LibSciHost.java b/libsci/src/sci/impl/LibSciHost.java
@@ -119,18 +139,21 @@ index 0000000..2d840cd
 +}
 diff --git a/libsci/src/sci/impl/libsci_host.clj b/libsci/src/sci/impl/libsci_host.clj
 new file mode 100644
-index 0000000..cdd3d95
+index 0000000..3ebec95
 --- /dev/null
 +++ b/libsci/src/sci/impl/libsci_host.clj
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,179 @@
 +(ns sci.impl.libsci-host
 +  (:require [cheshire.core :as json]
 +            [sci.core :as sci])
 +  (:gen-class
-+   :methods [^{:static true} [loadScript     [String] String]
-+             ^{:static true} [callFunction   [String String] String]
-+             ^{:static true} [evalInContext  [String] String]
-+             ^{:static true} [resetContext   [] void]]))
++   :methods [^{:static true} [loadScript          [String] String]
++             ^{:static true} [callFunction        [String String] String]
++             ^{:static true} [evalInContext       [String] String]
++             ^{:static true} [resetContext        [] void]
++             ^{:static true} [registerNamespaces  [String] String]]))
++
++;; -- Per-thread context registry --
 +
 +(defonce contexts (atom {}))
 +
@@ -140,18 +163,77 @@ index 0000000..cdd3d95
 +(defn- set-ctx! [ctx]
 +  (swap! contexts assoc (.getId (Thread/currentThread)) ctx))
 +
++;; -- Registered host namespaces --
++;; Stores registered namespace -> fn-name mappings.
++;; Structure: {"math" ["add" "subtract"], "io" ["read-file"]}
++;; Each fn-name is expanded into a SCI namespace binding at
++;; registration time via create-host-binding closures.
++
++(defonce registered-nss (atom {}))
++
++;; -- Reflection bridge to LibSciHost --
++;; Used instead of direct Java interop to avoid AOT dependency cycle
++;; between Clojure and Java sources.
++
 +(defn- dispatch-host-call [args-json]
-+  (let [cls  (Class/forName "sci.impl.LibSciHost")
-+        meth (.getMethod cls "dispatchHostCall" (into-array Class [String]))]
-+    (.invoke meth nil (into-array Object [args-json]))))
++  (try
++    (let [cls  (Class/forName "sci.impl.LibSciHost")
++          meth (.getMethod cls "dispatchHostCall" (into-array Class [String]))]
++      (.invoke meth nil (into-array Object [args-json])))
++    (catch Exception e
++      (str "{\"status\":\"error\",\"message\":\"Host bridge not available: "
++           (.getMessage e) "\"}"))))
++
++;; -- Closure factory for registered namespace functions --
++;; Creates a closure that captures ns-name and fn-name at registration
++;; time (static binding). When called from a SCI script, it constructs
++;; the unified JSON object format and dispatches through the host's
++;; C function pointer.
++
++(defn- create-host-binding [ns-name fn-name]
++  (fn [& args]
++    (let [call-json  (json/generate-string
++                       {"ns" ns-name
++                        "fn" fn-name
++                        "args" args})
++          raw-result (dispatch-host-call call-json)]
++      (if (string? raw-result)
++        (let [parsed (try (json/parse-string raw-result)
++                          (catch Exception e
++                            {"status" "error"
++                             "message" (str "Failed to parse host response: "
++                                           (.getMessage e))}))]
++          (if (= "ok" (get parsed "status"))
++            (get parsed "value")
++            (throw (ex-info (str "Host call failed: " (get parsed "message"))
++                            parsed))))
++        raw-result))))
++
++;; -- Build SCI namespace bindings from registration map --
++;; Transforms {"math" ["add" "subtract"]} into
++;; {'math {'add #<closure> 'subtract #<closure>}}
++
++(defn- build-ns-bindings [reg-nss]
++  (reduce-kv
++    (fn [m ns-name fns]
++      (assoc m (symbol ns-name)
++             (reduce (fn [bindings fn-name]
++                       (assoc bindings (symbol fn-name)
++                              (create-host-binding ns-name fn-name)))
++                     {}
++                     fns)))
++    {}
++    reg-nss))
 +
 +(defonce base-opts
 +  {:namespaces {'cheshire.core
 +                {'generate-string json/generate-string
 +                 'parse-string    json/parse-string}}
 +   :bindings {'host-call
-+              (fn [& args]
-+                (let [args-json  (json/generate-string (vec args))
++              (fn [fn-name & args]
++                (let [args-json  (json/generate-string
++                                   {"fn" (str fn-name)
++                                    "args" args})
 +                      raw-result (dispatch-host-call args-json)]
 +                  (if (string? raw-result)
 +                    (try (json/parse-string raw-result true)
@@ -161,12 +243,47 @@ index 0000000..cdd3d95
 +                                          (.getMessage e))}))
 +                    raw-result)))}})
 +
-+(defn- get-or-init-ctx []
++(defn- get-or-init-ctx
++  "Return current thread's context, creating one with base-opts
++  and any registered host namespaces."
++  []
 +  (if-let [ctx (get-ctx)]
 +    ctx
-+    (let [new-ctx (sci/init base-opts)]
++    (let [merged-opts (if (seq @registered-nss)
++                        (update base-opts :namespaces
++                                merge (build-ns-bindings @registered-nss))
++                        base-opts)
++          new-ctx     (sci/init merged-opts)]
 +      (set-ctx! new-ctx)
 +      new-ctx)))
++
++(defn -registerNamespaces
++  "Register host-provided namespaces and functions into SCI.
++  Expects JSON: {\"namespaces\": {\"ns-name\": [\"fn1\", \"fn2\", ...]}}
++  Each registered function becomes transparently callable from Clojure
++  scripts as (ns-name/fn-name args...), routing through the host dispatcher."
++  [regs-json]
++  (try
++    (let [parsed (json/parse-string regs-json)
++          nss    (get parsed "namespaces")]
++      (if (and nss (map? nss))
++        (do
++          (reset! registered-nss nss)
++          (let [ns-bindings (build-ns-bindings nss)]
++            (doseq [[thread-id ctx] @contexts]
++              (swap! contexts update thread-id
++                     #(sci/merge-opts % {:namespaces ns-bindings}))))
++          (json/generate-string {:status "ok"
++                                 :message (str (count nss)
++                                               " namespace(s) registered")}))
++        (json/generate-string
++          {:status "error"
++           :message "Invalid format. Expected {\"namespaces\": {\"ns\": [\"fns\"]}}" })))
++    (catch Exception e
++      (json/generate-string
++        {:status "error"
++         :error (str (type e))
++         :message (.getMessage e)}))))
 +
 +(defn -loadScript [s]
 +  (sci/binding [sci/out *out*]

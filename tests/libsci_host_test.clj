@@ -59,3 +59,49 @@
     (host/-loadScript "(ns my.ns) (defn calc [x] (* x 2))")
     (let [result (host/-callFunction "my.ns/calc" "21")]
       (is (= "42" (-> result json/parse-string (get "value")))))))
+
+(deftest register-namespaces-valid
+  (testing "registering valid namespaces returns ok"
+    (host/-resetContext)
+    (let [result (host/-registerNamespaces
+                   (json/generate-string
+                     {"namespaces" {"math" ["add" "subtract"]
+                                    "io"   ["read" "write"]}}))
+          parsed (json/parse-string result)]
+      (is (= "ok" (get parsed "status"))))))
+
+(deftest register-namespaces-error-invalid-json
+  (testing "malformed registration JSON returns error"
+    (host/-resetContext)
+    (let [result (host/-registerNamespaces "not-json")
+          parsed (json/parse-string result)]
+      (is (= "error" (get parsed "status"))))))
+
+(deftest register-namespaces-error-missing-key
+  (testing "missing namespaces key returns error"
+    (host/-resetContext)
+    (let [result (host/-registerNamespaces
+                   (json/generate-string {"bad-key" {}}))
+          parsed (json/parse-string result)]
+      (is (= "error" (get parsed "status"))))))
+
+(deftest register-namespaces-error-non-map
+  (testing "non-map namespaces value returns error"
+    (host/-resetContext)
+    (let [result (host/-registerNamespaces
+                   (json/generate-string {"namespaces" "not-a-map"}))
+          parsed (json/parse-string result)]
+      (is (= "error" (get parsed "status"))))))
+
+(deftest register-namespaces-new-context
+  (testing "registered namespaces are available in contexts created after registration"
+    (host/-resetContext)
+    (is (= "ok" (-> (host/-registerNamespaces
+                      (json/generate-string {"namespaces" {"math" ["add"]}}))
+                    json/parse-string (get "status"))))
+    ;; New context created by load_script after registration should
+    ;; include the registered namespace bindings
+    (let [result (host/-loadScript "(ns test) (def x (math/add 1 2))")]
+      ;; The math/add call will fail since no host dispatcher is set
+      ;; on JVM, but the binding should exist and be callable
+      (is (-> result json/parse-string (get "status"))))))

@@ -30,12 +30,26 @@ char* call_function(long long thread, const char* fn_name, const char* args_edn)
 char* eval_in_context(long long thread, const char* expr);
 void  reset_context(long long thread);
 char* eval_string(long long thread, const char* expr);
+char* register_namespaces(long long thread, const char* regs_json);
 
 /* ------------------------------------------------------------------ */
 /*  Host dispatcher callback                                          */
 /* ------------------------------------------------------------------ */
 
 static const char* host_dispatcher(const char* json_args) {
+    if (strstr(json_args, "\"ns\"") != NULL) {
+        /* Registered namespace call: {"ns":"math","fn":"add","args":[1,2]} */
+        if (strstr(json_args, "\"math\"") != NULL &&
+            strstr(json_args, "\"add\"") != NULL) {
+            return "{\"status\":\"ok\",\"value\":7}";
+        }
+        if (strstr(json_args, "\"math\"") != NULL &&
+            strstr(json_args, "\"subtract\"") != NULL) {
+            return "{\"status\":\"ok\",\"value\":-1}";
+        }
+        return "{\"status\":\"error\",\"message\":\"unknown registered function\"}";
+    }
+    /* Direct host-call: {"fn":"add","args":[3,4]} */
     if (strstr(json_args, "\"add\"")) {
         return "{\"status\":\"ok\",\"value\":7}";
     }
@@ -171,6 +185,52 @@ static int test_cross_ns_call(void) {
     return 1;
 }
 
+static int test_register_namespaces(void) {
+    graal_isolatethread_t* thread = NULL;
+    if (!_test_setup(&thread)) return 0;
+
+    char* r = register_namespaces((long long)thread,
+        "{\"namespaces\":{\"math\":[\"add\",\"subtract\"]}}");
+    ASSERT_JSON_OK(r, "register math namespace");
+
+    /* Test calling the registered function directly via eval */
+    r = load_script((long long)thread, "(math/add 1 2)");
+    ASSERT_JSON_OK(r, "call registered math/add");
+    ASSERT(strstr(r, "\"value\":\"7\"") != NULL, "math/add result should be 7");
+
+    graal_tear_down_isolate(thread);
+    return 1;
+}
+
+static int test_register_namespaces_after_load(void) {
+    graal_isolatethread_t* thread = NULL;
+    if (!_test_setup(&thread)) return 0;
+
+    load_script((long long)thread, "(def x 42)");
+
+    char* r = register_namespaces((long long)thread,
+        "{\"namespaces\":{\"late\":[\"fn\"]}}");
+    ASSERT_JSON_OK(r, "register after load");
+
+    r = load_script((long long)thread, "(defn use-late [y] (late/fn y))");
+    ASSERT_JSON_OK(r, "load script using late-registered ns");
+
+    graal_tear_down_isolate(thread);
+    return 1;
+}
+
+static int test_register_namespaces_error(void) {
+    graal_isolatethread_t* thread = NULL;
+    if (!_test_setup(&thread)) return 0;
+
+    char* r = register_namespaces((long long)thread, "not-json");
+    ASSERT(strstr(r, "\"status\":\"error\"") != NULL,
+           "bad JSON should return error");
+
+    graal_tear_down_isolate(thread);
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main                                                              */
 /* ------------------------------------------------------------------ */
@@ -187,6 +247,9 @@ int main(void) {
     TEST(host_call);
     TEST(edn_keyword_args);
     TEST(cross_ns_call);
+    TEST(register_namespaces);
+    TEST(register_namespaces_after_load);
+    TEST(register_namespaces_error);
 
     printf("\n%d / %d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

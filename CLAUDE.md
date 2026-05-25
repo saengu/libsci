@@ -12,22 +12,26 @@ It could be used as prebuilt dynamic library to embed into other host language, 
 - `/sci`: babashka/sci project as submodule and also the working directory.
 - `/patches`: Keep changes for sci submodule.
 - `/.github`: Github Workflow for build and release action.
-- `/tests`: Usage examples and integration test
+- `/tests`: integration test.
+- `examples`: usage examples.
 
 # Coding Conventions
-**TEST-DRIVEN DEVELOPMENT IS NON-NEGOTIABLE.**
+**TEST-DRIVEN DEVELOPMENT IS NON-NEGOTIABLE**
 
 
 # Common Commands
-** Build **: `bb libsci:compile` 
-** Generate patch **: `git diff > ../patches/changes.patch`
-** Apply patch **: `git apply ../patches/changes.patch`
+**Build**: `bb libsci:compile` 
+**Generate patch**: `git diff > ../patches/changes.patch`
+**Apply patch**: `git apply ../patches/changes.patch`
+**Run integration test**: `./scripts/run-tests.sh`
 
 # Rules
+
 - DO NOT commit changes to sci submodule, save all changes to patch instead and apply the patch before build.
-- **No Implementation First:** Do not write code to solve a problem before writing the corresponding failing test.
-- **Over-Engineering:** Do not write code for hypothetical future requirements. Only write what satisfies the current test.
-- **Fragile Tests:** Write tests that verify observable *behavior* and outputs, rather than internal implementation details. 
+- DO NOT modify patch file directly, apply patch to sci submodule and make changes on sci submoule, then regerneate patch.
+- **No Implementation First**: Do not write code to solve a problem before writing the corresponding failing test.
+- **Over-Engineering**: Do not write code for hypothetical future requirements. Only write what satisfies the current test.
+- **Fragile Tests**: Write tests that verify observable *behavior* and outputs, rather than internal implementation details. 
 
 
 # Current Focus
