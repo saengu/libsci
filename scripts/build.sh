@@ -20,16 +20,18 @@ SCI_DIR="$PROJECT_ROOT/sci"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         CP_SEP=";"
-        WIN_EXT=".cmd"
+        WIN_JAVAC="javac.exe"
+        WIN_NATIVEIMAGE="native-image.cmd"
         ;;
     *)
         CP_SEP=":"
-        WIN_EXT=""
+        WIN_JAVAC="javac"
+        WIN_NATIVEIMAGE="native-image"
         ;;
 esac
 
 # ── Setup GraalVM ─────────────────────────────────────────────
-NATIVE_IMAGE="$(which native-image${WIN_EXT} 2>/dev/null || echo "")"
+NATIVE_IMAGE="$(which ${WIN_NATIVEIMAGE} 2>/dev/null || echo "")"
 GRAALVM_HOME="${GRAALVM_HOME:-}"
 if [ -z "$GRAALVM_HOME" ] && [ -n "$NATIVE_IMAGE" ]; then
     GRAALVM_HOME="$(dirname "$(dirname "$(readlink -f "$NATIVE_IMAGE")")")"
@@ -77,7 +79,7 @@ echo "Uberjar: $UBERJAR"
 
 # ── Phase 2: javac compilation ─────────────────────────────────
 echo "═══ Phase 2: Compile Java @CEntryPoint sources ═══"
-JAVAC="$GRAALVM_HOME/bin/javac${WIN_EXT}"
+JAVAC="$GRAALVM_HOME/bin/${WIN_JAVAC}"
 
 $JAVAC \
     -cp "${UBERJAR}${CP_SEP}${SVM_JAR}" \
@@ -96,7 +98,7 @@ jar uf "$UBERJAR" -C target/java-classes libsci
 
 # ── Phase 3: Native Image ─────────────────────────────────────
 echo "═══ Phase 3: native-image --shared ═══"
-NATIVE_IMAGE_CMD="$GRAALVM_HOME/bin/native-image${WIN_EXT}"
+NATIVE_IMAGE_CMD="$GRAALVM_HOME/bin/${WIN_NATIVEIMAGE}"
 $NATIVE_IMAGE_CMD \
     -jar "$UBERJAR" \
     -cp "src/java${CP_SEP}target/java-classes${CP_SEP}src/clojure" \
