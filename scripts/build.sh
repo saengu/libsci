@@ -16,8 +16,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SCI_DIR="$PROJECT_ROOT/sci"
 
+# ── Platform detection ─────────────────────────────────────────
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        CP_SEP=";"
+        WIN_EXT=".cmd"
+        ;;
+    *)
+        CP_SEP=":"
+        WIN_EXT=""
+        ;;
+esac
+
 # ── Setup GraalVM ─────────────────────────────────────────────
-NATIVE_IMAGE="$(which native-image 2>/dev/null || echo "")"
+NATIVE_IMAGE="$(which native-image${WIN_EXT} 2>/dev/null || echo "")"
 GRAALVM_HOME="${GRAALVM_HOME:-}"
 if [ -z "$GRAALVM_HOME" ] && [ -n "$NATIVE_IMAGE" ]; then
     GRAALVM_HOME="$(dirname "$(dirname "$(readlink -f "$NATIVE_IMAGE")")")"
@@ -65,13 +77,7 @@ echo "Uberjar: $UBERJAR"
 
 # ── Phase 2: javac compilation ─────────────────────────────────
 echo "═══ Phase 2: Compile Java @CEntryPoint sources ═══"
-JAVAC="$GRAALVM_HOME/bin/javac"
-
-# Platform-aware classpath separator: javac.exe on Windows expects ";"
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) CP_SEP=";" ;;
-    *)                    CP_SEP=":" ;;
-esac
+JAVAC="$GRAALVM_HOME/bin/javac${WIN_EXT}"
 
 $JAVAC \
     -cp "${UBERJAR}${CP_SEP}${SVM_JAR}" \
@@ -90,7 +96,7 @@ jar uf "$UBERJAR" -C target/java-classes libsci
 
 # ── Phase 3: Native Image ─────────────────────────────────────
 echo "═══ Phase 3: native-image --shared ═══"
-NATIVE_IMAGE_CMD="$GRAALVM_HOME/bin/native-image"
+NATIVE_IMAGE_CMD="$GRAALVM_HOME/bin/native-image${WIN_EXT}"
 $NATIVE_IMAGE_CMD \
     -jar "$UBERJAR" \
     -cp "src/java${CP_SEP}target/java-classes${CP_SEP}src/clojure" \
