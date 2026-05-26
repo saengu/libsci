@@ -1,3 +1,8 @@
+//! Zig integration test for the libsci C API.
+//! Tests: sci_create_context, sci_destroy_context, sci_reset_context,
+//!        sci_eval_string, sci_call_script_fn, sci_register_host_fn
+//!        sci_version, sci_abi_version
+
 const std = @import("std");
 const c = @import("libsci");
 
@@ -12,6 +17,15 @@ fn resultOk(value: []const u8) [*:0]const u8 {
     return s.ptr;
 }
 
+fn resultOkStr(value: []const u8) [*:0]const u8 {
+    const s = std.fmt.bufPrintZ(&result_buf, "{s}{s}{s}", .{
+        "{\"status\":\"ok\",\"value\":\"",
+        value,
+        "\"}",
+    }) catch unreachable;
+    return s.ptr;
+}
+
 fn resultErr(msg: []const u8) [*:0]const u8 {
     const s = std.fmt.bufPrintZ(&result_buf, "{s}{s}{s}", .{
         "{\"status\":\"error\",\"message\":\"",
@@ -21,172 +35,155 @@ fn resultErr(msg: []const u8) [*:0]const u8 {
     return s.ptr;
 }
 
+// ── Test harness ──
+
 var tests_run: i32 = 0;
 var tests_passed: i32 = 0;
 
-fn test(name: []const u8, body: *const fn () bool) void {
+fn runTest(name: []const u8, body: *const fn () bool) void {
     tests_run += 1;
     const passed = body();
     if (passed) tests_passed += 1;
     std.debug.print("  {s}: {s}\n", .{ if (passed) "PASS" else "FAIL", name });
 }
 
-fn check(ok: bool, msg: []const u8) bool {
+fn assert(ok: bool, msg: []const u8) bool {
     if (!ok) std.debug.print("    ASSERT FAIL: {s}\n", .{msg});
     return ok;
 }
 
-fn createIsolate() *c.graal_isolatethread_t {
+fn jsonOk(r: [*:0]const u8) bool {
+    return std.mem.indexOf(u8, std.mem.span(r), "\"status\":\"ok\"") != null;
+}
+
+fn setup() *c.graal_isolatethread_t {
     var isolate: ?*c.graal_isolate_t = null;
     var thread: ?*c.graal_isolatethread_t = null;
     _ = c.graal_create_isolate(null, &isolate, &thread);
+    c.sci_create_context(thread);
     return thread.?;
 }
 
-fn jsonOk(result: [*:0]const u8) bool {
-    return std.mem.indexOf(u8, std.mem.span(result), "\"status\":\"ok\"") != null;
+// ── Host dispatcher callback ──
+
+export fn host_add(_: [*:0]const u8) callconv(.c) [*:0]const u8 {
+    return resultOk("7");
 }
 
-export fn host_dispatcher(json_args: [*:0]const u8) callconv(.c) [*:0]const u8 {
-    const s = std.mem.span(json_args);
-    if (std.mem.indexOf(u8, s, "\"ns\"") != null) {
-        if (std.mem.indexOf(u8, s, "\"math\"") != null and
-            std.mem.indexOf(u8, s, "\"add\"") != null)
-        {
-            return resultOk("7");
-        }
-        return resultOk("0");
+// ── Tests ──
+
+fn testVersion() bool {
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
     }
-    if (std.mem.indexOf(u8, s, "\"add\"") != null) {
-        return resultOk("7");
-    }
-    return resultErr("unknown host function");
+    const ver = c.sci_version(thread);
+    _ = assert(std.mem.len(ver) > 0, "version non-empty");
+    return c.sci_abi_version(thread) > 0;
 }
 
-fn testSetHostDispatcher() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    c.graal_tear_down_isolate(thread);
+fn testCreateDestroy() bool {
+    var isolate: ?*c.graal_isolate_t = null;
+    var thread: ?*c.graal_isolatethread_t = null;
+    _ = c.graal_create_isolate(null, &isolate, &thread);
+    c.sci_create_context(thread);
+    c.sci_destroy_context(thread);
+    _ = c.graal_tear_down_isolate(thread);
     return true;
 }
 
-fn testLoadAndCall() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    _ = c.load_script(@intCast(@intFromPtr(thread)), "(defn add [x y] (+ x y))");
-    const r = c.call_function(@intCast(@intFromPtr(thread)), "add", "3 4");
-    c.graal_tear_down_isolate(thread);
-    const s = std.mem.span(r);
-    return jsonOk(r) and std.mem.indexOf(u8, s, "\"value\":\"7\"") != null;
+fn testEvalSimple() bool {
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
+    }
+    const r = c.sci_eval_string(thread, "(+ 1 2)");
+    return jsonOk(r) and std.mem.indexOf(u8, std.mem.span(r), "\"value\":\"3\"") != null;
 }
 
-fn testEvalInContext() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    _ = c.load_script(@intCast(@intFromPtr(thread)), "(def x 42)");
-    const r = c.eval_in_context(@intCast(@intFromPtr(thread)), "x");
-    c.graal_tear_down_isolate(thread);
-    return std.mem.indexOf(u8, std.mem.span(r), "\"value\":\"42\"") != null;
+fn testEvalError() bool {
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
+    }
+    const r = c.sci_eval_string(thread, "(+ 1");
+    return std.mem.indexOf(u8, std.mem.span(r), "\"status\":\"error\"") != null;
 }
 
-fn testEvalFresh() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    const r1 = c.eval_string(@intCast(@intFromPtr(thread)), "(def x 42)");
-    const r2 = c.eval_string(@intCast(@intFromPtr(thread)),
-        "(try x (catch Exception e \"err\"))");
-    c.graal_tear_down_isolate(thread);
-    const s1 = std.mem.span(r1);
-    const s2 = std.mem.span(r2);
-    return std.mem.indexOf(u8, s1, "#'user/x") != null and
-           std.mem.indexOf(u8, s2, "err") != null;
+fn testPersistentContext() bool {
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
+    }
+    _ = c.sci_eval_string(thread, "(def x 42)");
+    const r = c.sci_eval_string(thread, "x");
+    return jsonOk(r) and std.mem.indexOf(u8, std.mem.span(r), "\"value\":\"42\"") != null;
 }
 
 fn testResetContext() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    _ = c.load_script(@intCast(@intFromPtr(thread)), "(def x 1)");
-    c.reset_context(@intCast(@intFromPtr(thread)));
-    const r = c.call_function(@intCast(@intFromPtr(thread)), "add", "1 2");
-    c.graal_tear_down_isolate(thread);
-    return std.mem.indexOf(u8, std.mem.span(r), "\"status\":\"error\"") != null;
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
+    }
+    _ = c.sci_eval_string(thread, "(def x 1)");
+    c.sci_reset_context(thread);
+    const r = c.sci_eval_string(thread, "(try x (catch Exception e \"err\"))");
+    return std.mem.indexOf(u8, std.mem.span(r), "err") != null;
 }
 
-fn testHostCall() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    _ = c.load_script(@intCast(@intFromPtr(thread)),
-        "(defn compute [x y] (host-call \"add\" x y))");
-    const r = c.call_function(@intCast(@intFromPtr(thread)), "compute", "3 4");
-    c.graal_tear_down_isolate(thread);
-    const s = std.mem.span(r);
-    return jsonOk(r) and std.mem.indexOf(u8, s, ":value 7") != null;
-}
-
-fn testEdnKeywordArgs() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    _ = c.load_script(@intCast(@intFromPtr(thread)), "(defn get-val [m k] (get m k))");
-    const r = c.call_function(@intCast(@intFromPtr(thread)), "get-val", "{:a 1 :b 2} :a");
-    c.graal_tear_down_isolate(thread);
-    return std.mem.indexOf(u8, std.mem.span(r), "\"value\":\"1\"") != null;
-}
-
-fn testCrossNsCall() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    _ = c.load_script(@intCast(@intFromPtr(thread)),
-        "(ns my.ns) (defn calc [x] (* x 2))");
-    const r = c.call_function(@intCast(@intFromPtr(thread)), "my.ns/calc", "21");
-    c.graal_tear_down_isolate(thread);
-    return std.mem.indexOf(u8, std.mem.span(r), "\"value\":\"42\"") != null;
-}
-
-fn testRegisterNamespaces() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    const r1 = c.register_namespaces(@intCast(@intFromPtr(thread)),
-        "{\"namespaces\":{\"math\":[\"add\",\"subtract\"]}}");
-    _ = check(jsonOk(r1), "register_namespaces should succeed");
-    const r2 = c.load_script(@intCast(@intFromPtr(thread)), "(math/add 1 2)");
-    _ = check(jsonOk(r2), "math/add call should succeed");
-    c.graal_tear_down_isolate(thread);
-    return jsonOk(r1) and jsonOk(r2);
-}
-
-fn testRegisterNamespacesAfterLoad() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    _ = c.load_script(@intCast(@intFromPtr(thread)), "(def x 42)");
-    const r = c.register_namespaces(@intCast(@intFromPtr(thread)),
-        "{\"namespaces\":{\"late\":[\"fn\"]}}");
-    c.graal_tear_down_isolate(thread);
+fn testHostCallback() bool {
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
+    }
+    c.sci_register_host_fn(thread, "test", "add", @intCast(@intFromPtr(&host_add)));
+    const r = c.sci_eval_string(thread, "(host/invoke \"test\" \"add\" 3 4)");
     return jsonOk(r);
 }
 
-fn testRegisterNamespacesError() bool {
-    const thread = createIsolate();
-    c.set_host_dispatcher(@intCast(@intFromPtr(thread)), @intCast(@intFromPtr(&host_dispatcher)));
-    const r = c.register_namespaces(@intCast(@intFromPtr(thread)), "not-json");
-    c.graal_tear_down_isolate(thread);
-    return std.mem.indexOf(u8, std.mem.span(r), "\"status\":\"error\"") != null;
+fn testHostCallbackSugar() bool {
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
+    }
+    c.sci_register_host_fn(thread, "test", "add", @intCast(@intFromPtr(&host_add)));
+    const r = c.sci_eval_string(thread, "(test/add 3 4)");
+    return jsonOk(r) and std.mem.indexOf(u8, std.mem.span(r), "\"value\":\"7\"") != null;
 }
 
-pub fn main() void {
-    std.debug.print("libsci host bridge Zig integration tests\n", .{});
-    std.debug.print("----------------------------------------\n", .{});
+fn testCallScriptFn() bool {
+    const thread = setup();
+    defer {
+        c.sci_destroy_context(thread);
+        _ = c.graal_tear_down_isolate(thread);
+    }
+    _ = c.sci_eval_string(thread, "(defn count-items [v] (count v))");
+    const r = c.sci_call_script_fn(thread, "user", "count-items", "[1 2 3]");
+    return jsonOk(r) and std.mem.indexOf(u8, std.mem.span(r), "\"value\":\"3\"") != null;
+}
 
-    test("set_host_dispatcher", testSetHostDispatcher);
-    test("load_and_call", testLoadAndCall);
-    test("eval_in_context", testEvalInContext);
-    test("eval_fresh", testEvalFresh);
-    test("reset_context", testResetContext);
-    test("host_call", testHostCall);
-    test("edn_keyword_args", testEdnKeywordArgs);
-    test("cross_ns_call", testCrossNsCall);
-    test("register_namespaces", testRegisterNamespaces);
-    test("register_namespaces_after_load", testRegisterNamespacesAfterLoad);
-    test("register_namespaces_error", testRegisterNamespacesError);
+// ── Main ──
+
+pub fn main() void {
+    std.debug.print("libsci Zig API integration tests\n", .{});
+    std.debug.print("-------------------------------\n", .{});
+
+    runTest("version", testVersion);
+    runTest("create_destroy", testCreateDestroy);
+    runTest("eval_simple", testEvalSimple);
+    runTest("eval_error", testEvalError);
+    runTest("persistent_context", testPersistentContext);
+    runTest("reset_context", testResetContext);
+    runTest("host_callback", testHostCallback);
+    runTest("host_callback_sugar", testHostCallbackSugar);
+    runTest("call_script_fn", testCallScriptFn);
 
     std.debug.print("\n{d} / {d} tests passed\n", .{ tests_passed, tests_run });
     if (tests_passed != tests_run) std.process.exit(1);

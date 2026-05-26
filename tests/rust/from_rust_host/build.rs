@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 fn main() {
     let libsci_path = env::var("LIBSCI_PATH")
-        .unwrap_or_else(|_| "../sci/libsci/target".to_string());
+        .unwrap_or_else(|_| "../../../target".to_string());
 
     println!("cargo:rustc-link-lib=sci");
     println!("cargo:rustc-link-search={}", libsci_path);

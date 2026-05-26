@@ -2,6 +2,10 @@
 sci/libsci/target/
 sci/target/
 sci/classes/
+target
+.zig-cache
+zig-out
+.build
 
 # Native image outputs
 *.so

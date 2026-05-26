@@ -1,255 +1,187 @@
-/*
- * from_c_host.c -- Integration test for libsci host bridge API.
+/* from_c_host.c — Integration test for the new libsci C API.
  *
- * Tests all C entry points:
- *   set_host_dispatcher, load_script, call_function,
- *   eval_in_context, reset_context, eval_string
+ * Tests:
+ *   sci_create_context, sci_destroy_context, sci_reset_context
+ *   sci_eval_string, sci_call_script_fn, sci_register_host_fn
+ *   sci_version, sci_abi_version
  *
- * Host passes a raw function pointer to set_host_dispatcher.
- * libsci calls it directly via CFunctionPointer — no callPtr
- * bridge needed on the host side.
- *
- * Build: gcc -o from_c_host from_c_host.c -I../../sci/libsci/target \
- *        -L../../sci/libsci/target -lsci
- * Run:   LD_LIBRARY_PATH=../../sci/libsci/target ./from_c_host
+ * Build: gcc -o from_c_host from_c_host.c -I../../target -L../../target -lsci -Wl,-rpath,../../target
+ * Run:   ./from_c_host
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <libsci.h>
-
-/* ------------------------------------------------------------------ */
-/*  Forward declarations (exported from libsci.so via @CEntryPoint)   */
-/* ------------------------------------------------------------------ */
-
-void set_host_dispatcher(long long thread, long long fn_ptr);
-char* load_script(long long thread, const char* script);
-char* call_function(long long thread, const char* fn_name, const char* args_edn);
-char* eval_in_context(long long thread, const char* expr);
-void  reset_context(long long thread);
-char* eval_string(long long thread, const char* expr);
-char* register_namespaces(long long thread, const char* regs_json);
-
-/* ------------------------------------------------------------------ */
-/*  Host dispatcher callback                                          */
-/* ------------------------------------------------------------------ */
-
-static const char* host_dispatcher(const char* json_args) {
-    if (strstr(json_args, "\"ns\"") != NULL) {
-        /* Registered namespace call: {"ns":"math","fn":"add","args":[1,2]} */
-        if (strstr(json_args, "\"math\"") != NULL &&
-            strstr(json_args, "\"add\"") != NULL) {
-            return "{\"status\":\"ok\",\"value\":7}";
-        }
-        if (strstr(json_args, "\"math\"") != NULL &&
-            strstr(json_args, "\"subtract\"") != NULL) {
-            return "{\"status\":\"ok\",\"value\":-1}";
-        }
-        return "{\"status\":\"error\",\"message\":\"unknown registered function\"}";
-    }
-    /* Direct host-call: {"fn":"add","args":[3,4]} */
-    if (strstr(json_args, "\"add\"")) {
-        return "{\"status\":\"ok\",\"value\":7}";
-    }
-    return "{\"status\":\"error\",\"message\":\"unknown host function\"}";
-}
-
-/* ------------------------------------------------------------------ */
-/*  Test helpers                                                      */
-/* ------------------------------------------------------------------ */
 
 static int tests_run = 0;
 static int tests_passed = 0;
 
 #define TEST(name) do { tests_run++; if (test_##name()) { tests_passed++; printf("  PASS: %s\n", #name); } else { printf("  FAIL: %s\n", #name); } } while(0)
 #define ASSERT(cond, msg) do { if (!(cond)) { fprintf(stderr, "    ASSERT FAIL: %s\n", msg); return 0; } } while(0)
-#define ASSERT_JSON_OK(json, msg) do { if (strstr((json), "\"status\":\"ok\"") == NULL) { fprintf(stderr, "    ASSERT FAIL: %s -- expected ok, got [%s]\n", msg, (json)); return 0; } } while(0)
+#define ASSERT_OK(json) ASSERT(strstr((json), "\"status\":\"ok\"") != NULL, "expected ok status")
+#define ASSERT_VAL(json, expected) ASSERT(strstr((json), "\"value\":\"" expected "\"") != NULL, "expected value")
 
-static int _test_setup(graal_isolatethread_t** t) {
-    graal_isolate_t* isolate = NULL;
-    if (graal_create_isolate(NULL, &isolate, t) != 0) return 0;
-    set_host_dispatcher((long long)*t, (long long)&host_dispatcher);
-    return 1;
+/* ── Host dispatcher ── */
+
+static const char* host_add(const char* json_args) {
+    (void)json_args;
+    return "{\"status\":\"ok\",\"value\":7}";
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tests                                                             */
-/* ------------------------------------------------------------------ */
+/* ── Tests ── */
 
-static int test_set_host_dispatcher(void) {
-    graal_isolate_t* isolate = NULL;
+static int test_version(void) {
     graal_isolatethread_t* thread = NULL;
-    if (graal_create_isolate(NULL, &isolate, &thread) != 0) return 0;
-    set_host_dispatcher((long long)thread, (long long)&host_dispatcher);
-    graal_tear_down_isolate(thread);
-    return 1;
-}
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
 
-static int test_load_and_call(void) {
-    graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
-
-    char* r = load_script((long long)thread, "(defn add [x y] (+ x y))");
-    ASSERT_JSON_OK(r, "load script");
-
-    r = call_function((long long)thread, "add", "3 4");
-    ASSERT_JSON_OK(r, "call add");
-    ASSERT(strstr(r, "\"value\":\"7\"") != NULL, "add result should be 7");
+    const char* ver = sci_version(thread);
+    ASSERT(strlen(ver) > 0, "version string non-empty");
+    ASSERT(sci_abi_version(thread) > 0, "abi version > 0");
 
     graal_tear_down_isolate(thread);
     return 1;
 }
 
-static int test_eval_in_context(void) {
+static int test_create_destroy(void) {
     graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
-
-    load_script((long long)thread, "(def x 42)");
-    char* r = eval_in_context((long long)thread, "x");
-    ASSERT_JSON_OK(r, "eval in context");
-    ASSERT(strstr(r, "\"value\":\"42\"") != NULL, "x should be 42");
-
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
+    sci_destroy_context(thread);
     graal_tear_down_isolate(thread);
     return 1;
 }
 
-static int test_eval_fresh(void) {
+static int test_eval_simple(void) {
     graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
 
-    char* r = eval_string((long long)thread, "(def x 42)");
-    ASSERT(strstr(r, "#'user/x") != NULL, "def should succeed in eval_string");
+    char* r = sci_eval_string(thread, "(+ 1 2)");
+    ASSERT_OK(r);
+    ASSERT(strstr(r, "\"value\":\"3\"") != NULL, "(+ 1 2) = 3");
 
-    r = eval_string((long long)thread, "(try x (catch Exception e \"err\"))");
-    ASSERT(strstr(r, "err") != NULL, "x should not be visible after fresh eval_string");
+    sci_destroy_context(thread);
+    graal_tear_down_isolate(thread);
+    return 1;
+}
 
+static int test_eval_error(void) {
+    graal_isolatethread_t* thread = NULL;
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
+
+    char* r = sci_eval_string(thread, "(+ 1");
+    ASSERT(strstr(r, "\"status\":\"error\"") != NULL, "parse error returns error");
+
+    sci_destroy_context(thread);
+    graal_tear_down_isolate(thread);
+    return 1;
+}
+
+static int test_persistent_context(void) {
+    graal_isolatethread_t* thread = NULL;
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
+
+    sci_eval_string(thread, "(def x 42)");
+    char* r = sci_eval_string(thread, "x");
+    ASSERT_OK(r);
+    ASSERT(strstr(r, "\"value\":\"42\"") != NULL, "x = 42");
+
+    sci_destroy_context(thread);
     graal_tear_down_isolate(thread);
     return 1;
 }
 
 static int test_reset_context(void) {
     graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
 
-    load_script((long long)thread, "(def x 1)");
-    reset_context((long long)thread);
+    sci_eval_string(thread, "(def x 1)");
+    sci_reset_context(thread);
 
-    char* r = call_function((long long)thread, "add", "1 2");
-    ASSERT(strstr(r, "\"status\":\"error\"") != NULL, "call should fail after reset");
+    char* r = sci_eval_string(thread, "(try x (catch Exception e \"err\"))");
+    ASSERT(strstr(r, "err") != NULL, "x should be gone after reset");
 
+    sci_destroy_context(thread);
     graal_tear_down_isolate(thread);
     return 1;
 }
 
-static int test_host_call(void) {
+static int test_host_callback(void) {
     graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
 
-    char* r = load_script((long long)thread,
-        "(defn compute [x y] (host-call \"add\" x y))");
-    ASSERT_JSON_OK(r, "load compute");
+    sci_register_host_fn(thread, "test", "add", (long long)&host_add);
 
-    r = call_function((long long)thread, "compute", "3 4");
-    ASSERT_JSON_OK(r, "host-call via compute");
-    ASSERT(strstr(r, ":value 7") != NULL, "result value should contain :value 7");
+    /* Use host/invoke which is the dynamic dispatch path */
+    char* r = sci_eval_string(thread, "(host/invoke \"test\" \"add\" 3 4)");
+    ASSERT(strstr(r, "\"status\":\"ok\"") != NULL, "host callback returns ok");
 
+    sci_destroy_context(thread);
     graal_tear_down_isolate(thread);
     return 1;
 }
 
-static int test_edn_keyword_args(void) {
+static int test_host_callback_sugar(void) {
     graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
 
-    load_script((long long)thread, "(defn get-val [m k] (get m k))");
-    char* r = call_function((long long)thread, "get-val", "{:a 1 :b 2} :a");
-    ASSERT_JSON_OK(r, "EDN keyword arg");
-    ASSERT(strstr(r, "\"value\":\"1\"") != NULL, "should return 1");
+    /* Register host fn; should create SCI var for (test/add 3 4) syntax */
+    sci_register_host_fn(thread, "test", "add", (long long)&host_add);
 
+    /* Transparent call via SCI var — the "sugar" path */
+    char* r = sci_eval_string(thread, "(test/add 3 4)");
+    ASSERT(strstr(r, "\"status\":\"ok\"") != NULL, "sugar: test/add returns ok");
+    ASSERT(strstr(r, "\"value\":\"7\"") != NULL, "sugar: test/add returns 7");
+
+    sci_destroy_context(thread);
     graal_tear_down_isolate(thread);
     return 1;
 }
 
-static int test_cross_ns_call(void) {
+static int test_call_script_fn(void) {
     graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
+    graal_isolate_t* iso = NULL;
+    graal_create_isolate(NULL, &iso, &thread);
+    sci_create_context(thread);
 
-    load_script((long long)thread, "(ns my.ns) (defn calc [x] (* x 2))");
-    char* r = call_function((long long)thread, "my.ns/calc", "21");
-    ASSERT_JSON_OK(r, "cross-ns call");
-    ASSERT(strstr(r, "\"value\":\"42\"") != NULL, "should return 42");
+    /* Define a fn that takes a vector argument and counts it */
+    sci_eval_string(thread, "(defn count-items [v] (count v))");
+    char* r = sci_call_script_fn(thread, "user", "count-items", "[1 2 3]");
+    ASSERT(strstr(r, "\"status\":\"ok\"") != NULL, "call_script_fn ok");
+    ASSERT(strstr(r, "\"value\":\"3\"") != NULL, "count of [1 2 3] = 3");
 
+    sci_destroy_context(thread);
     graal_tear_down_isolate(thread);
     return 1;
 }
-
-static int test_register_namespaces(void) {
-    graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
-
-    char* r = register_namespaces((long long)thread,
-        "{\"namespaces\":{\"math\":[\"add\",\"subtract\"]}}");
-    ASSERT_JSON_OK(r, "register math namespace");
-
-    /* Test calling the registered function directly via eval */
-    r = load_script((long long)thread, "(math/add 1 2)");
-    ASSERT_JSON_OK(r, "call registered math/add");
-    ASSERT(strstr(r, "\"value\":\"7\"") != NULL, "math/add result should be 7");
-
-    graal_tear_down_isolate(thread);
-    return 1;
-}
-
-static int test_register_namespaces_after_load(void) {
-    graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
-
-    load_script((long long)thread, "(def x 42)");
-
-    char* r = register_namespaces((long long)thread,
-        "{\"namespaces\":{\"late\":[\"fn\"]}}");
-    ASSERT_JSON_OK(r, "register after load");
-
-    r = load_script((long long)thread, "(defn use-late [y] (late/fn y))");
-    ASSERT_JSON_OK(r, "load script using late-registered ns");
-
-    graal_tear_down_isolate(thread);
-    return 1;
-}
-
-static int test_register_namespaces_error(void) {
-    graal_isolatethread_t* thread = NULL;
-    if (!_test_setup(&thread)) return 0;
-
-    char* r = register_namespaces((long long)thread, "not-json");
-    ASSERT(strstr(r, "\"status\":\"error\"") != NULL,
-           "bad JSON should return error");
-
-    graal_tear_down_isolate(thread);
-    return 1;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Main                                                              */
-/* ------------------------------------------------------------------ */
 
 int main(void) {
-    printf("libsci host bridge integration tests\n");
-    printf("------------------------------------\n");
+    printf("libsci C API integration tests\n");
+    printf("-------------------------------\n");
 
-    TEST(set_host_dispatcher);
-    TEST(load_and_call);
-    TEST(eval_in_context);
-    TEST(eval_fresh);
+    TEST(version);
+    TEST(create_destroy);
+    TEST(eval_simple);
+    TEST(eval_error);
+    TEST(persistent_context);
     TEST(reset_context);
-    TEST(host_call);
-    TEST(edn_keyword_args);
-    TEST(cross_ns_call);
-    TEST(register_namespaces);
-    TEST(register_namespaces_after_load);
-    TEST(register_namespaces_error);
+    TEST(host_callback);
+    TEST(host_callback_sugar);
+    TEST(call_script_fn);
 
     printf("\n%d / %d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

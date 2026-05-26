@@ -10,11 +10,6 @@ on:
         description: "babashka/sci branch/tag/commit to build"
         required: true
         type: string
-      patch_ref:
-        description: "apply host bridge patch"
-        required: false
-        default: "true"
-        type: string
       release_tag:
         description: "release tag (e.g. v0.1.0)"
         required: true
@@ -50,24 +45,18 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout parent repo and submodules
+      - name: Checkout repository and submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Switch babashka/sci to specified ref (manual trigger)
+      - name: Switch submodule to specified SCI ref (manual trigger)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         working-directory: sci
         run: |
           git fetch origin --tags
           git checkout "${{ inputs.sci_ref }}"
-          echo "babashka/sci ref: $(git rev-parse --short HEAD)"
-
-      - name: Apply patch inside submodule directory
-        if: ${{ inputs.patch_ref == 'true' }}
-        working-directory: sci
-        run: |
-          git apply ../patches/host_bridge.patch
+          echo "SCI ref: $(git rev-parse --short HEAD)"
 
       - uses: graalvm/setup-graalvm@v1
         with:
@@ -76,26 +65,27 @@ jobs:
           components: "native-image"
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Clojure tools
+      - name: Install Leiningen
         uses: DeLaGuardo/setup-clojure@12.5
         with:
           lein: "2.11.2"
-          bb: "latest"
 
       - name: Cache Maven dependencies
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository
-          key: maven-${{ runner.os }}-${{ hashFiles('sci/project.clj') }}
+          key: maven-${{ runner.os }}-${{ hashFiles('project.clj') }}
           restore-keys: maven-${{ runner.os }}-
 
       - name: Build libsci shared library
-        working-directory: sci
-        run: bb libsci:compile
+        shell: bash
+        run: ./scripts/build.sh
+        env:
+          GRAALVM_HOME: ${{ env.JAVA_HOME }}
 
       - name: Fix macOS dylib install name
         if: runner.os == 'macOS'
-        run: install_name_tool -id "@rpath/libsci.dylib" sci/libsci/target/libsci.dylib
+        run: install_name_tool -id "@rpath/libsci.dylib" target/libsci.dylib
 
       - name: Install zip on Windows
         if: matrix.os == 'windows-latest'
@@ -105,9 +95,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p release/lib release/include
-          cp sci/libsci/target/libsci.* release/lib/ 2>/dev/null || true
-          cp sci/libsci/target/sci.* release/lib/ 2>/dev/null || true
-          cp sci/libsci/target/*.h release/include/
+          cp target/libsci.* release/lib/ 2>/dev/null || true
+          cp target/*.h release/include/
           cd release && zip -r "../libsci-${{ matrix.name }}.zip" .
 
       - name: Upload release artifact

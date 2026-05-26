@@ -1,0 +1,7 @@
+module Clibsci {
+    header "libsci.h"
+    header "graal_isolate.h"
+    header "graal_isolate_dynamic.h"
+    link "sci"
+    export *
+}

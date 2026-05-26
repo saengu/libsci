@@ -4,9 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const include_path = b.path("../../sci/libsci/target");
+    const include_path = b.path("../../target");
     const translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("../../sci/libsci/target/libsci.h"),
+        .root_source_file = b.path("../../target/libsci.h"),
         .target = target,
         .optimize = optimize,
     });

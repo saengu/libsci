@@ -1,0 +1,9 @@
+[
+  {"name": "libsci.LibsciAPI",
+   "methods": [
+     {"name":"getSciCtx",    "parameterTypes":[]},
+     {"name":"setSciCtx",    "parameterTypes":["java.lang.Object"]},
+     {"name":"invokeHostFn", "parameterTypes":["java.lang.String","java.lang.String","java.lang.String"]}
+   ]},
+  {"name": "libsci.LibsciHostFn"}
+]
