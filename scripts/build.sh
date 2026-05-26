@@ -66,8 +66,15 @@ echo "Uberjar: $UBERJAR"
 # ── Phase 2: javac compilation ─────────────────────────────────
 echo "═══ Phase 2: Compile Java @CEntryPoint sources ═══"
 JAVAC="$GRAALVM_HOME/bin/javac"
+
+# Platform-aware classpath separator: javac.exe on Windows expects ";"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) CP_SEP=";" ;;
+    *)                    CP_SEP=":" ;;
+esac
+
 $JAVAC \
-    -cp "$UBERJAR:$SVM_JAR" \
+    -cp "${UBERJAR}${CP_SEP}${SVM_JAR}" \
     --add-exports org.graalvm.nativeimage/org.graalvm.nativeimage.c.function=ALL-UNNAMED \
     --add-exports org.graalvm.nativeimage/org.graalvm.nativeimage.c.type=ALL-UNNAMED \
     --add-exports org.graalvm.nativeimage/org.graalvm.nativeimage=ALL-UNNAMED \
@@ -86,7 +93,7 @@ echo "═══ Phase 3: native-image --shared ═══"
 NATIVE_IMAGE_CMD="$GRAALVM_HOME/bin/native-image"
 $NATIVE_IMAGE_CMD \
     -jar "$UBERJAR" \
-    -cp "src/java:target/java-classes:src/clojure" \
+    -cp "src/java${CP_SEP}target/java-classes${CP_SEP}src/clojure" \
     -H:Name=libsci \
     --shared \
     --no-fallback \
