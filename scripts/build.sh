@@ -53,10 +53,18 @@ echo "═══ Phase 2: Compile Java @CEntryPoint sources ═══"
 JAVAC="$GRAALVM_HOME/bin/javac"
 $JAVAC \
     -cp "$UBERJAR:$SVM_JAR" \
+    --add-exports org.graalvm.nativeimage/org.graalvm.nativeimage.c.function=ALL-UNNAMED \
+    --add-exports org.graalvm.nativeimage/org.graalvm.nativeimage.c.type=ALL-UNNAMED \
+    --add-exports org.graalvm.nativeimage/org.graalvm.nativeimage=ALL-UNNAMED \
+    --add-exports org.graalvm.word/org.graalvm.word=ALL-UNNAMED \
     -d target/java-classes \
+    src/java/libsci/LibsciHostFn.java \
     src/java/libsci/LibsciAPI.java
 
 echo "Java compilation successful"
+
+# Add compiled @CEntryPoint classes to the uberjar for native-image discovery
+jar uf "$UBERJAR" -C target/java-classes libsci
 
 # ── Phase 3: Native Image ─────────────────────────────────────
 echo "═══ Phase 3: native-image --shared ═══"
