@@ -37,10 +37,25 @@ fi
 echo "GRAALVM_HOME: $GRAALVM_HOME"
 echo "SVM_JAR: $SVM_JAR"
 
+# ── Find lein (cross-platform) ─────────────────────────────────
+LEIN="lein"
+if command -v lein >/dev/null 2>&1; then
+    LEIN="lein"
+elif [ -n "${LEIN_HOME:-}" ] && [ -f "$LEIN_HOME/bin/lein" ]; then
+    LEIN="$LEIN_HOME/bin/lein"
+elif [ -n "${LEIN_HOME:-}" ] && [ -f "$LEIN_HOME/bin/lein.bat" ]; then
+    LEIN="cmd //c $LEIN_HOME/bin/lein.bat"
+elif [ -n "${LEIN_JAR:-}" ]; then
+    LEIN="java -jar $LEIN_JAR"
+elif [ -f "/usr/local/bin/lein" ]; then
+    LEIN="/usr/local/bin/lein"
+fi
+echo "lein: $LEIN"
+
 # ── Phase 1: Uberjar ──────────────────────────────────────────
 echo "═══ Phase 1: Leiningen uberjar ═══"
 cd "$PROJECT_ROOT"
-lein with-profiles +libsci do clean, uberjar
+$LEIN with-profiles +libsci do clean, uberjar
 UBERJAR=$(ls -t target/sci-libsci-*-standalone.jar 2>/dev/null | head -1)
 if [ -z "$UBERJAR" ]; then
     echo "ERROR: uberjar not found in target/"
@@ -88,12 +103,24 @@ $NATIVE_IMAGE_CMD \
 echo "═══ Copying artifacts ═══"
 mkdir -p target
 
-for f in libsci.so libsci.h graal_isolate.h graal_isolate_dynamic.h libsci_dynamic.h; do
+case "$(uname -s)" in
+    Darwin)  LIB_EXT="dylib" ;;
+    MINGW*|MSYS*|CYGWIN*) LIB_EXT="dll" ;;
+    *)       LIB_EXT="so" ;;
+esac
+
+for f in "libsci.${LIB_EXT}" libsci.h graal_isolate.h graal_isolate_dynamic.h libsci_dynamic.h; do
     if [ -f "$f" ]; then
         mv "$f" target/
         echo "  target/$f"
     fi
 done
 
+# On Windows, native-image also produces a .lib import library
+if [ -f "libsci.lib" ]; then
+    mv libsci.lib target/
+    echo "  target/libsci.lib"
+fi
+
 echo ""
-echo "Build complete: target/libsci.so"
+echo "Build complete: target/libsci.${LIB_EXT}"
